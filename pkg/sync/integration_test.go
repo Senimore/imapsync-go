@@ -13,11 +13,11 @@ import (
 	"github.com/emersion/go-imap/backend/memory"
 	"github.com/emersion/go-imap/server"
 
-	"github.com/example/imapsync-go/internal/imapx"
-	"github.com/example/imapsync-go/internal/logging"
-	"github.com/example/imapsync-go/internal/options"
-	"github.com/example/imapsync-go/internal/report"
-	"github.com/example/imapsync-go/internal/sync"
+	"github.com/Senimore/imapsync-go/pkg/imapx"
+	"github.com/Senimore/imapsync-go/pkg/logging"
+	"github.com/Senimore/imapsync-go/pkg/options"
+	"github.com/Senimore/imapsync-go/pkg/report"
+	"github.com/Senimore/imapsync-go/pkg/sync"
 )
 
 // testServer — in-memory IMAP-сервер на эфемерном порту.

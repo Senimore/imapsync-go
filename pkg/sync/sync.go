@@ -21,11 +21,11 @@ import (
 
 	"github.com/emersion/go-imap"
 
-	"github.com/example/imapsync-go/internal/cache"
-	"github.com/example/imapsync-go/internal/imapx"
-	"github.com/example/imapsync-go/internal/logging"
-	"github.com/example/imapsync-go/internal/options"
-	"github.com/example/imapsync-go/internal/report"
+	"github.com/Senimore/imapsync-go/pkg/cache"
+	"github.com/Senimore/imapsync-go/pkg/imapx"
+	"github.com/Senimore/imapsync-go/pkg/logging"
+	"github.com/Senimore/imapsync-go/pkg/options"
+	"github.com/Senimore/imapsync-go/pkg/report"
 )
 
 // regexTransRule описывает правило s/from/to/flags для папок или флагов.
