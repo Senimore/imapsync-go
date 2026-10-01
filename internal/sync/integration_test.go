@@ -61,7 +61,7 @@ func (ts *testServer) connect(t *testing.T) *imapx.Conn {
 		t.Fatalf("connect: %v", err)
 	}
 	t.Cleanup(func() { c.Logout() })
-	if err := c.Login("username", "password", "LOGIN"); err != nil {
+	if err := c.Login("username", "password", "LOGIN", "", false); err != nil {
 		t.Fatalf("login: %v", err)
 	}
 	return c
@@ -382,7 +382,7 @@ func (ts *testServer) connect2() (*imapx.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := c.Login("username", "password", "LOGIN"); err != nil {
+	if err := c.Login("username", "password", "LOGIN", "", false); err != nil {
 		c.Logout()
 		return nil, err
 	}

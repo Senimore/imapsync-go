@@ -7,6 +7,7 @@ package options
 
 import (
 	"fmt"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -24,6 +25,13 @@ type Options struct {
 
 	// Механизмы аутентификации: LOGIN (по умолчанию) или XOAUTH2.
 	AuthMech1, AuthMech2 string
+
+	// Административная (proxy) аутентификация, как в imapsync:
+	// --authuser1/--authuser2 — пользователь, под которым выполняется
+	// аутентификация (admin user); --proxyauth1/--proxyauth2 — команда
+	// PROXYAUTH после логина (требует --authuserN).
+	AuthUser1, AuthUser2   string
+	ProxyAuth1, ProxyAuth2 bool
 
 	// TLS.
 	SSL1, SSL2 bool // imap over TLS (imaps), порт 993 по умолчанию
@@ -46,6 +54,11 @@ type Options struct {
 	Exclude1   []string // исключить папки источника (по подстроке)
 	ExcludeAll []string
 
+	// Префиксы папок (как в imapsync): --prefix1 — префикс, который
+	// удаляется из имён папок источника (обычно "INBOX." или "INBOX/"),
+	// --prefix2 — префикс, который добавляется ко всем папкам host2.
+	Prefix1, Prefix2 string
+
 	// Удаления.
 	Delete1             bool // удалить из источника после переноса
 	Expunge1            bool
@@ -65,6 +78,25 @@ type Options struct {
 	MinSize, MaxSize int64
 	MinAge, MaxAge   float64 // в днях
 	Search           string  // доп. критерий (не реализован полностью)
+
+	// --skipmess: список регулярных выражений; сообщение пропускается,
+	// если его полное содержимое совпадает с любым из них (как в imapsync).
+	SkipMess []string
+	// SkipMessRe — скомпилированные SkipMess (заполняется в Parse).
+	SkipMessRe []*regexp.Regexp
+
+	// Ограничение скорости (как в imapsync):
+	// --maxmessagespersecond — максимум перенесённых сообщений в секунду;
+	// --maxbytespersecond — максимум перенесённых байт в секунду;
+	// --maxbytesafter — байты, после которых начинается учёт для
+	// --maxbytespersecond (до этого порога байты не учитываются).
+	MaxMessagesPerSecond float64
+	MaxBytesPerSecond    int64
+	MaxBytesAfter        int64
+
+	// --errorsmax: максимальное число ошибок, при котором imapsync
+	// останавливается (по умолчанию 50, как в оригинале).
+	ErrorsMax int
 
 	// Режимы.
 	Dry             bool
@@ -97,6 +129,7 @@ func New() *Options {
 		TimeoutSec:       0,
 		Threads:          1,
 		SkipEmptyFolders: true,
+		ErrorsMax:        50, // $ERRORS_MAX в imapsync
 	}
 }
 
@@ -130,6 +163,9 @@ func (p *parser) value(key string) (string, error) {
 func Parse(args []string) (*Options, error) {
 	o := New()
 	p := &parser{args: args}
+
+	// Явно заданные authmech (в imapsync: authmech ||= authuser ? 'PLAIN' : 'LOGIN').
+	var authmech1Set, authmech2Set bool
 
 	for p.i < len(p.args) {
 		a := p.args[p.i]
@@ -213,12 +249,30 @@ func Parse(args []string) (*Options, error) {
 				return nil, e
 			}
 			o.AuthMech1 = strings.ToUpper(v)
+			authmech1Set = true
 		case "authmech2":
 			v, e := get()
 			if e != nil {
 				return nil, e
 			}
 			o.AuthMech2 = strings.ToUpper(v)
+			authmech2Set = true
+		case "authuser1":
+			v, e := get()
+			if e != nil {
+				return nil, e
+			}
+			o.AuthUser1 = v
+		case "authuser2":
+			v, e := get()
+			if e != nil {
+				return nil, e
+			}
+			o.AuthUser2 = v
+		case "proxyauth1":
+			o.ProxyAuth1 = true
+		case "proxyauth2":
+			o.ProxyAuth2 = true
 
 		case "ssl1":
 			o.SSL1 = true
@@ -299,6 +353,18 @@ func Parse(args []string) (*Options, error) {
 				return nil, e
 			}
 			o.ExcludeAll = append(o.ExcludeAll, v)
+		case "prefix1":
+			v, e := get()
+			if e != nil {
+				return nil, e
+			}
+			o.Prefix1 = v
+		case "prefix2":
+			v, e := get()
+			if e != nil {
+				return nil, e
+			}
+			o.Prefix2 = v
 
 		case "delete1":
 			o.Delete1 = true
@@ -364,6 +430,59 @@ func Parse(args []string) (*Options, error) {
 				return nil, e
 			}
 			o.Search = v
+		case "skipmess":
+			v, e := get()
+			if e != nil {
+				return nil, e
+			}
+			// Проверяем регулярное выражение сразу, как это делает imapsync
+			// (eval на строке " " при разборе опций).
+			re, e2 := regexp.Compile(v)
+			if e2 != nil {
+				return nil, fmt.Errorf("некорректное регулярное выражение в --skipmess %q: %w", v, e2)
+			}
+			o.SkipMess = append(o.SkipMess, v)
+			o.SkipMessRe = append(o.SkipMessRe, re)
+		case "maxmessagespersecond":
+			v, e := get()
+			if e != nil {
+				return nil, e
+			}
+			f, e2 := strconv.ParseFloat(v, 64)
+			if e2 != nil {
+				return nil, e2
+			}
+			o.MaxMessagesPerSecond = f
+		case "maxbytespersecond":
+			v, e := get()
+			if e != nil {
+				return nil, e
+			}
+			n, e2 := strconv.ParseInt(v, 10, 64)
+			if e2 != nil {
+				return nil, e2
+			}
+			o.MaxBytesPerSecond = n
+		case "maxbytesafter":
+			v, e := get()
+			if e != nil {
+				return nil, e
+			}
+			n, e2 := strconv.ParseInt(v, 10, 64)
+			if e2 != nil {
+				return nil, e2
+			}
+			o.MaxBytesAfter = n
+		case "errorsmax":
+			v, e := get()
+			if e != nil {
+				return nil, e
+			}
+			n, e2 := strconv.Atoi(v)
+			if e2 != nil {
+				return nil, e2
+			}
+			o.ErrorsMax = n
 
 		case "dry":
 			o.Dry = true
@@ -432,6 +551,15 @@ func Parse(args []string) (*Options, error) {
 		o.Expunge1 = true
 	}
 
+	// Как в imapsync: authmech по умолчанию = PLAIN, если задан authuser,
+	// иначе LOGIN (но только когда authmech не задан явно).
+	if o.AuthUser1 != "" && !authmech1Set {
+		o.AuthMech1 = "PLAIN"
+	}
+	if o.AuthUser2 != "" && !authmech2Set {
+		o.AuthMech2 = "PLAIN"
+	}
+
 	return o, nil
 }
 
@@ -442,6 +570,16 @@ func (o *Options) Validate() error {
 	}
 	if o.Host2 == "" || o.User2 == "" {
 		return fmt.Errorf("не заданы --host2/--user2")
+	}
+	// Как в imapsync: --proxyauthN требует --authuserN.
+	if o.ProxyAuth1 && o.AuthUser1 == "" {
+		return fmt.Errorf("--proxyauth1 требует --authuser1")
+	}
+	if o.ProxyAuth2 && o.AuthUser2 == "" {
+		return fmt.Errorf("--proxyauth2 требует --authuser2")
+	}
+	if o.ErrorsMax <= 0 {
+		return fmt.Errorf("--errorsmax должно быть больше нуля")
 	}
 	return nil
 }
@@ -462,6 +600,9 @@ func Usage() string {
   --tls1/--tls2        STARTTLS
   --ssl-insecure       не проверять TLS-сертификат
   --authmech1/2        LOGIN (по умолчанию) или XOAUTH2
+  --authuser1/2        пользователь для аутентификации (admin user);
+                       по умолчанию включает PLAIN вместо LOGIN
+  --proxyauth1/2       выполнить PROXYAUTH после логина (требует --authuserN)
   --timeout N          таймаут команды в секундах (0 = без таймаута)
   --useheader H        заголовок для определения дубликатов (повторяется)
   --folder F           синхронизировать только папку F (повторяется)
@@ -470,6 +611,8 @@ func Usage() string {
   --f1f2 SRC DST       явное отображение папок (повторяется)
   --automap            автоматически отображать одноимённые папки
   --exclude1 P         исключить папки источника по подстроке
+  --prefix1 P          удалить префикс P из имён папок источника (напр. "INBOX.")
+  --prefix2 P          добавить префикс P ко всем папкам назначения
   --delete1            удалить из источника после переноса (подразумевает --expunge1)
   --delete2            удалить из назначения отсутствующие в источнике
   --delete2folders     удалить папки назначения, отсутствующие в источнике
@@ -479,6 +622,11 @@ func Usage() string {
   --noresyncflags      не пересинхронизировать флаги
   --minsize/--maxsize  фильтр по размеру сообщения (байт)
   --minage/--maxage    фильтр по возрасту сообщения (дней)
+  --skipmess RE        пропустить сообщения, содержимое которых совпадает с RE (повторяется)
+  --maxmessagespersecond N  ограничить скорость: сообщений в секунду
+  --maxbytespersecond  N  ограничить скорость: байт в секунду
+  --maxbytesafter N    байты, после которых учитывается --maxbytespersecond
+  --errorsmax N        остановить при достижении N ошибок (по умолчанию 50)
   --dry                имитация без записи
   --justconnect        только подключиться и показать capabilities
   --justlogin          только подключиться и залогиниться
