@@ -338,8 +338,9 @@ go build -o imapsync-go .
 
 ```
 imapsync-go/
-├── main.go                      # CLI, подключение, спец-режимы, коды выхода
-├── internal/
+├── main.go                      # CLI — тонкая обёртка над pkg/imapsync
+├── pkg/
+│   ├── imapsync/imapsync.go     # публичный фасад: Run/RunSync (точка входа для модуля)
 │   ├── options/options.go       # разбор аргументов в стиле imapsync
 │   ├── imapx/imapx.go           # обёртка go-imap: Connect, Login, Select, Fetch, Append
 │   ├── sync/sync.go             # ядро: обход папок, дедупликация, перенос, флаги
@@ -350,6 +351,71 @@ imapsync-go/
 └── .imapsync_cache/             # SQLite-кэш (по умолчанию)
 ```
 
+## Использование как модуля
+
+Модуль: `github.com/Senimore/imapsync-go` (публичные пакеты в `pkg/`).
+
+```sh
+go get github.com/Senimore/imapsync-go
+```
+
+### Вариант 1 — полный цикл по аргументам (как CLI)
+
+```go
+package main
+
+import (
+	"os"
+
+	"github.com/Senimore/imapsync-go/pkg/imapsync"
+)
+
+func main() {
+	// Разбор аргументов, валидация, соединения, синхронизация, отчёт.
+	os.Exit(imapsync.Run(os.Args[1:], os.Stdout))
+}
+```
+
+### Вариант 2 — программный вызов с готовыми опциями
+
+```go
+package main
+
+import (
+	"os"
+
+	"github.com/Senimore/imapsync-go/pkg/imapsync"
+	"github.com/Senimore/imapsync-go/pkg/options"
+)
+
+func main() {
+	opts, err := options.Parse([]string{
+		"--host1", "imap.src.ru", "--user1", "a", "--password1", "p1",
+		"--host2", "imap.dst.ru", "--user2", "b", "--password2", "p2",
+		"--ssl1", "--ssl2", "--useheader", "Message-Id",
+	})
+	if err != nil {
+		panic(err)
+	}
+	code := imapsync.RunSync(opts, os.Stdout)
+	// Статистику можно получить через report.Snapshot (см. pkg/report).
+	os.Exit(code)
+}
+```
+
+### Коды выхода
+
+| Константа | Значение | Смысл |
+|-----------|----------|-------|
+| `imapsync.ExOK` | 0 | успех |
+| `imapsync.ExSoftware` | 100 | ошибка соединения/логина/синхронизации |
+| `imapsync.ExCantCreat` | 73 | нельзя создать файл журнала |
+| `imapsync.ExUsage` | 64 | ошибка разбора/валидации опций |
+
+Низкоуровневые пакеты (`pkg/imapx`, `pkg/sync`, `pkg/cache`, `pkg/logging`, `pkg/report`) тоже публичные — их можно использовать напрямую для интеграций (например, `sync.New` + `Sync.Run` со своими соединениями и `report.Stats`).
+
+Для приватных Gitea-репозиториев используйте `GOPRIVATE`/`GOPROXY=off` и `replace` в `go.mod` вашего проекта.
+
 ## Тестирование
 
 ```sh
@@ -357,7 +423,7 @@ go test -count=1 ./...
 go test -race -count=1 ./...
 ```
 
-Интеграционные тесты (`internal/sync/integration_test.go`) используют in-memory IMAP-бэкенд.
+Интеграционные тесты (`pkg/sync/integration_test.go`) используют in-memory IMAP-бэкенд.
 
 ## Примечания
 

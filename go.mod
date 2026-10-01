@@ -1,4 +1,4 @@
-module github.com/example/imapsync-go
+module github.com/Senimore/imapsync-go
 
 go 1.26.0
 
