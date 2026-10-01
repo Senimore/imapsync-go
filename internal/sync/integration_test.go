@@ -115,7 +115,7 @@ func folderMessages(t *testing.T, c *imapx.Conn, folder string) (int, []string) 
 	if _, err := c.Select(folder, false); err != nil {
 		t.Fatalf("select %q: %v", folder, err)
 	}
-	uids, err := c.UidSearchAll()
+	uids, err := c.UidSearchAll("")
 	if err != nil {
 		t.Fatalf("search %q: %v", folder, err)
 	}
@@ -198,7 +198,7 @@ func TestIntegrationFlagsPreserved(t *testing.T) {
 	if _, err := dst.Select("INBOX", false); err != nil {
 		t.Fatalf("select: %v", err)
 	}
-	uids, err := dst.UidSearchAll()
+	uids, err := dst.UidSearchAll("")
 	if err != nil || len(uids) != 2 {
 		t.Fatalf("ожидалось 2 сообщения на host2 (дефолт + f1), получено %d (err=%v)", len(uids), err)
 	}

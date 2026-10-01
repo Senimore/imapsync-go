@@ -234,3 +234,218 @@ func TestThrottleOptions(t *testing.T) {
 		t.Fatalf("expected error for bad maxbytespersecond")
 	}
 }
+
+func TestSepSearchSkipHeader(t *testing.T) {
+	o, err := Parse([]string{
+		"--host1", "h1", "--user1", "u1", "--host2", "h2", "--user2", "u2",
+		"--sep1", "/", "--sep2", ".",
+		"--search1", "UNSEEN", "--search2", "FLAGGED",
+		"--skipheader", "^X-",
+	})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if o.Sep1 != "/" || o.Sep2 != "." {
+		t.Fatalf("sep1/sep2: %q %q", o.Sep1, o.Sep2)
+	}
+	if o.Search1 != "UNSEEN" || o.Search2 != "FLAGGED" {
+		t.Fatalf("search1/search2: %q %q", o.Search1, o.Search2)
+	}
+	if o.SkipHeaderRe == nil || !o.SkipHeaderRe.MatchString("X-Spam") {
+		t.Fatalf("skipheader regex not set correctly")
+	}
+}
+
+func TestDry1Logdir(t *testing.T) {
+	o, err := Parse([]string{
+		"--host1", "h1", "--user1", "u1", "--host2", "h2", "--user2", "u2",
+		"--dry", "--logdir", "/tmp/logs",
+	})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if !o.Dry || !o.Dry1 {
+		t.Fatalf("dry should imply dry1: %+v", o)
+	}
+	if o.Logdir != "/tmp/logs" {
+		t.Fatalf("logdir: %q", o.Logdir)
+	}
+	// nodry1 отключает dry1.
+	o, err = Parse([]string{
+		"--host1", "h1", "--user1", "u1", "--host2", "h2", "--user2", "u2",
+		"--dry", "--nodry1",
+	})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if !o.Dry || o.Dry1 {
+		t.Fatalf("nodry1 should disable dry1: %+v", o)
+	}
+}
+
+func TestUseUIDUseCache(t *testing.T) {
+	o, err := Parse([]string{
+		"--host1", "h1", "--user1", "u1", "--host2", "h2", "--user2", "u2",
+		"--useuid", "--cachedir", "/tmp/cache",
+	})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if !o.UseUID {
+		t.Fatalf("useuid not set")
+	}
+	// useuid подразумевает usecache.
+	if !o.UseCache {
+		t.Fatalf("useuid should imply usecache")
+	}
+	if o.CacheDir != "/tmp/cache" {
+		t.Fatalf("cachedir: %q", o.CacheDir)
+	}
+}
+
+func TestUseCacheSkipCrossConflict(t *testing.T) {
+	o, err := Parse([]string{
+		"--host1", "h1", "--user1", "u1", "--host2", "h2", "--user2", "u2",
+		"--usecache", "--skipcrossduplicates",
+	})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if err := o.Validate(); err == nil {
+		t.Fatalf("expected conflict between usecache and skipcrossduplicates")
+	}
+}
+
+func TestRegexTrans2IncludeExclude(t *testing.T) {
+	o, err := Parse([]string{
+		"--host1", "h1", "--user1", "u1", "--host2", "h2", "--user2", "u2",
+		"--regextrans2", "s/^INBOX\\./New./",
+		"--include", "^INBOX/Work",
+		"--exclude", "^INBOX/Junk",
+		"--folderfirst", "INBOX",
+		"--folderlast", "Trash",
+	})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(o.RegexTrans2) != 1 {
+		t.Fatalf("regextrans2: %v", o.RegexTrans2)
+	}
+	if len(o.IncludeRe) != 1 {
+		t.Fatalf("include: %v", o.Include)
+	}
+	if len(o.ExcludeRe) != 1 {
+		t.Fatalf("exclude: %v", o.Exclude)
+	}
+	if len(o.FolderFirst) != 1 || o.FolderFirst[0] != "INBOX" {
+		t.Fatalf("folderfirst: %v", o.FolderFirst)
+	}
+	if len(o.FolderLast) != 1 || o.FolderLast[0] != "Trash" {
+		t.Fatalf("folderlast: %v", o.FolderLast)
+	}
+}
+
+func TestSyncInternalDatesFilterFlags(t *testing.T) {
+	o, err := Parse([]string{
+		"--host1", "h1", "--user1", "u1", "--host2", "h2", "--user2", "u2",
+		"--nosyncinternaldates", "--nofilterflags",
+		"--regexflag", "s/\\*\\$/",
+	})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if o.SyncInternalDates {
+		t.Fatalf("nosyncinternaldates should disable syncinternaldates")
+	}
+	if o.FilterFlags {
+		t.Fatalf("nofilterflags should disable filterflags")
+	}
+	if len(o.RegexFlag) != 1 {
+		t.Fatalf("regexflag: %v", o.RegexFlag)
+	}
+}
+
+func TestAppendlimitTruncmess(t *testing.T) {
+	o, err := Parse([]string{
+		"--host1", "h1", "--user1", "u1", "--host2", "h2", "--user2", "u2",
+		"--appendlimit", "1000000", "--truncmess", "500000",
+	})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if o.Appendlimit != 1000000 {
+		t.Fatalf("appendlimit: %d", o.Appendlimit)
+	}
+	if o.Truncmess != 500000 {
+		t.Fatalf("truncmess: %d", o.Truncmess)
+	}
+}
+
+func TestMaxSleep(t *testing.T) {
+	o, err := Parse([]string{
+		"--host1", "h1", "--user1", "u1", "--host2", "h2", "--user2", "u2",
+		"--maxsleep", "5.5",
+	})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if o.MaxSleep != 5.5 {
+		t.Fatalf("maxsleep: %v", o.MaxSleep)
+	}
+}
+
+func TestDelete2ImpliesUidExpunge2(t *testing.T) {
+	o, err := Parse([]string{
+		"--host1", "h1", "--user1", "u1", "--host2", "h2", "--user2", "u2",
+		"--delete2",
+	})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if !o.UidExpunge2 {
+		t.Fatalf("delete2 should imply uidexpunge2")
+	}
+}
+
+func TestDelete2DuplicatesImpliesUidExpunge2(t *testing.T) {
+	o, err := Parse([]string{
+		"--host1", "h1", "--user1", "u1", "--host2", "h2", "--user2", "u2",
+		"--delete2duplicates",
+	})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if !o.UidExpunge2 {
+		t.Fatalf("delete2duplicates should imply uidexpunge2")
+	}
+}
+
+func TestSyncFlagsAfterCopy(t *testing.T) {
+	o, err := Parse([]string{
+		"--host1", "h1", "--user1", "u1", "--host2", "h2", "--user2", "u2",
+		"--syncflagsaftercopy",
+	})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if !o.SyncFlagsAfterCopy {
+		t.Fatalf("syncflagsaftercopy not set")
+	}
+}
+
+func TestExpungeAfterEachDefault(t *testing.T) {
+	o := New()
+	if !o.ExpungeAfterEach {
+		t.Fatalf("expungeaftereach should default to true")
+	}
+	o, err := Parse([]string{
+		"--host1", "h1", "--user1", "u1", "--host2", "h2", "--user2", "u2",
+		"--noexpungeaftereach",
+	})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if o.ExpungeAfterEach {
+		t.Fatalf("noexpungeaftereach should disable expungeaftereach")
+	}
+}

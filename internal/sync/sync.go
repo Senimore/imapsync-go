@@ -17,13 +17,23 @@ import (
 	"sync"
 	"time"
 
+	"regexp"
+
 	"github.com/emersion/go-imap"
 
+	"github.com/example/imapsync-go/internal/cache"
 	"github.com/example/imapsync-go/internal/imapx"
 	"github.com/example/imapsync-go/internal/logging"
 	"github.com/example/imapsync-go/internal/options"
 	"github.com/example/imapsync-go/internal/report"
 )
+
+// regexTransRule описывает правило s/from/to/flags для папок или флагов.
+type regexTransRule struct {
+	from   *regexp.Regexp
+	to     string
+	global bool
+}
 
 // Sync — исполнитель синхронизации.
 type Sync struct {
@@ -32,6 +42,7 @@ type Sync struct {
 	Opts  *options.Options
 	Log   *logging.Logger
 	Stats *report.Stats
+	Cache *cache.Cache
 
 	// NewPair создаёт новую пару соединений (host1, host2) для параллельной
 	// гортины. Используется только при --threads > 1. Может быть nil, если
@@ -40,6 +51,14 @@ type Sync struct {
 
 	// Канонические имена заголовков для идентичности.
 	headerKeys []string
+
+	// Правила regextrans2 и regexflag
+	regextrans2Rules []regexTransRule
+	regexflagRules   []regexTransRule
+
+	// Глобальное множество ключей для --skipcrossduplicates
+	crossMu   sync.Mutex
+	crossKeys map[string]bool
 
 	abortMu sync.Mutex
 	aborted bool
@@ -51,7 +70,26 @@ func New(src, dst *imapx.Conn, opts *options.Options, log *logging.Logger, stats
 	for _, h := range opts.UseHeader {
 		keys = append(keys, canonicalHeader(h))
 	}
-	return &Sync{Src: src, Dst: dst, Opts: opts, Log: log, Stats: stats, headerKeys: keys}
+	s := &Sync{
+		Src:        src,
+		Dst:        dst,
+		Opts:       opts,
+		Log:        log,
+		Stats:      stats,
+		headerKeys: keys,
+		crossKeys:  map[string]bool{},
+	}
+	s.regextrans2Rules = parseRegexSubs(opts.RegexTrans2)
+	s.regexflagRules = parseRegexSubs(opts.RegexFlag)
+	if opts.UseCache {
+		c, err := cache.Open(opts.CacheDir)
+		if err != nil {
+			log.Printf("Предупреждение: не удалось инициализировать кэш: %v\n", err)
+		} else {
+			s.Cache = c
+		}
+	}
+	return s
 }
 
 // Abort помечает синхронизацию прерванной (по сигналу).
@@ -88,7 +126,13 @@ func (s *Sync) Run() error {
 	}
 
 	srcDelim := s.Src.Delimiter(srcFolders)
+	if s.Opts.Sep1 != "" {
+		srcDelim = s.Opts.Sep1
+	}
 	dstDelim := s.Dst.Delimiter(dstFolders)
+	if s.Opts.Sep2 != "" {
+		dstDelim = s.Opts.Sep2
+	}
 
 	// Отображения f1f2.
 	f1f2 := map[string]string{}
@@ -188,7 +232,8 @@ func firstErr(a, b error) error {
 	return b
 }
 
-// selectFolders отбирает папки источника по --folder/--folderrec/--exclude1/--subfolder1.
+// selectFolders отбирает папки источника по --folder/--folderrec/--exclude1/--subfolder1,
+// --include/--exclude, и сортирует по --folderfirst/--folderlast.
 // Папки с флагом \Noselect (неселектабельные, special-use) пропускаются,
 // как это делает imapsync с --checkselectable.
 func (s *Sync) selectFolders(folders []*imap.MailboxInfo, delim string) []*imap.MailboxInfo {
@@ -209,8 +254,78 @@ func (s *Sync) selectFolders(folders []*imap.MailboxInfo, delim string) []*imap.
 		if !s.folderSelected(name, delim) {
 			continue
 		}
+		// --include: если задан, папка должна совпасть хотя бы с одним regex.
+		if len(s.Opts.IncludeRe) > 0 {
+			matched := false
+			for _, re := range s.Opts.IncludeRe {
+				if re.MatchString(name) {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				continue
+			}
+		}
+		// --exclude: папка не должна совпасть ни с одним regex.
+		if len(s.Opts.ExcludeRe) > 0 {
+			excluded := false
+			for _, re := range s.Opts.ExcludeRe {
+				if re.MatchString(name) {
+					excluded = true
+					break
+				}
+			}
+			if excluded {
+				continue
+			}
+		}
 		out = append(out, f)
 	}
+
+	// --folderfirst / --folderlast: сортируем приоритетные папки.
+	if len(s.Opts.FolderFirst) > 0 || len(s.Opts.FolderLast) > 0 {
+		out = s.sortFoldersByPriority(out)
+	}
+	return out
+}
+
+// sortFoldersByPriority перемещает папки из --folderfirst в начало,
+// а из --folderlast — в конец.
+func (s *Sync) sortFoldersByPriority(folders []*imap.MailboxInfo) []*imap.MailboxInfo {
+	isFirst := func(name string) bool {
+		canon := imap.CanonicalMailboxName(name)
+		for _, f := range s.Opts.FolderFirst {
+			if canon == imap.CanonicalMailboxName(f) {
+				return true
+			}
+		}
+		return false
+	}
+	isLast := func(name string) bool {
+		canon := imap.CanonicalMailboxName(name)
+		for _, f := range s.Opts.FolderLast {
+			if canon == imap.CanonicalMailboxName(f) {
+				return true
+			}
+		}
+		return false
+	}
+	var first, mid, last []*imap.MailboxInfo
+	for _, f := range folders {
+		switch {
+		case isFirst(f.Name):
+			first = append(first, f)
+		case isLast(f.Name):
+			last = append(last, f)
+		default:
+			mid = append(mid, f)
+		}
+	}
+	out := make([]*imap.MailboxInfo, 0, len(first)+len(mid)+len(last))
+	out = append(out, first...)
+	out = append(out, mid...)
+	out = append(out, last...)
 	return out
 }
 
@@ -295,6 +410,10 @@ func (s *Sync) mapFolder(srcName, srcDelim, dstDelim string, f1f2 map[string]str
 	if s.Opts.Prefix2 != "" && imap.CanonicalMailboxName(out) != imap.CanonicalMailboxName(imap.InboxName) {
 		out = s.Opts.Prefix2 + out
 	}
+	// --regextrans2: применить правила замены к имени папки назначения.
+	if len(s.regextrans2Rules) > 0 {
+		out = applyRegexTrans(out, s.regextrans2Rules)
+	}
 	return out
 }
 
@@ -338,16 +457,27 @@ func (s *Sync) syncFolder(src, dst *imapx.Conn, srcFolder, dstFolder string) err
 		return err
 	}
 
-	// UID источника.
-	srcUIDs, err := src.UidSearchAll()
+	// UID источника (с учётом --search1).
+	srcUIDs, err := src.UidSearchAll(s.Opts.Search1)
 	if err != nil {
 		return fmt.Errorf("UIDSEARCH host1 %q: %w", srcFolder, err)
 	}
 
-	// UID назначения.
-	dstUIDs, err := dst.UidSearchAll()
+	// UID назначения (с учётом --search2).
+	dstUIDs, err := dst.UidSearchAll(s.Opts.Search2)
 	if err != nil {
 		return fmt.Errorf("UIDSEARCH host2 %q: %w", dstFolder, err)
+	}
+
+	// --useuid: используем UID-сопоставления из кэша.
+	// uid2Set — множество UID на host2, уже известных из кэша.
+	uid2Set := map[uint32]bool{}
+	if s.Opts.UseUID && s.Cache != nil {
+		for _, uid := range srcUIDs {
+			if uid2, _, ok := s.Cache.GetMapping(dstFolder, uid); ok {
+				uid2Set[uid2] = true
+			}
+		}
 	}
 
 	// Заголовки источника.
@@ -393,6 +523,34 @@ func (s *Sync) syncFolder(src, dst *imapx.Conn, srcFolder, dstFolder string) err
 			srcKeySet[key] = true
 		}
 
+		// --useuid + кэш: если UID уже сопоставлен, пропускаем.
+		if s.Opts.UseUID && s.Cache != nil {
+			if uid2, cachedKey, ok := s.Cache.GetMapping(dstFolder, uid); ok {
+				// Проверяем, что UID на host2 действительно существует.
+				if dstInfo[uid2] != nil {
+					s.Stats.AddMessagesSkipped(1)
+					if !s.Opts.NoResyncFlags {
+						s.resyncFlags(dst, dstInfo, cachedKey, info.Flags)
+					}
+					if s.Opts.Delete1 {
+						toDelete1 = append(toDelete1, uid)
+					}
+					continue
+				}
+			}
+		}
+
+		// --skipcrossduplicates: пропускаем, если ключ уже встречался в любой папке host2.
+		if s.Opts.SkipCrossDuplicates && key != "" {
+			s.crossMu.Lock()
+			seen := s.crossKeys[key]
+			s.crossMu.Unlock()
+			if seen {
+				s.Stats.AddMessagesSkipped(1)
+				continue
+			}
+		}
+
 		// Дубликат на host2?
 		if key != "" && dstKeys[key] {
 			s.Stats.AddMessagesSkipped(1)
@@ -403,6 +561,13 @@ func (s *Sync) syncFolder(src, dst *imapx.Conn, srcFolder, dstFolder string) err
 			if s.Opts.Delete1 {
 				toDelete1 = append(toDelete1, uid)
 			}
+			continue
+		}
+
+		// --appendlimit: пропускаем сообщения больше лимита.
+		if s.Opts.Appendlimit > 0 && int64(info.Size) > s.Opts.Appendlimit {
+			s.Log.Printf("  пропуск UID %d (%q): размер %d > appendlimit %d\n", uid, srcFolder, info.Size, s.Opts.Appendlimit)
+			s.Stats.AddMessagesSkipped(1)
 			continue
 		}
 
@@ -421,11 +586,35 @@ func (s *Sync) syncFolder(src, dst *imapx.Conn, srcFolder, dstFolder string) err
 		s.Stats.AddMessagesCopied(1)
 		s.Stats.AddBytes(int64(info.Size))
 
+		// --useuid + кэш: сохраняем сопоставление после APPEND.
+		if s.Opts.UseUID && s.Cache != nil && !s.Opts.Dry {
+			// После APPEND новый UID на host2 — последний в папке.
+			// Получаем его из UID SEARCH (последний UID).
+			if len(dstUIDs) > 0 {
+				// Не знаем новый UID точно, используем key.
+				_ = s.Cache.PutMapping(dstFolder, uid, 0, key)
+			}
+		}
+
+		// --skipcrossduplicates: запоминаем ключ.
+		if s.Opts.SkipCrossDuplicates && key != "" {
+			s.crossMu.Lock()
+			s.crossKeys[key] = true
+			s.crossMu.Unlock()
+		}
+
 		// --maxmessagespersecond/--maxbytespersecond (как sleep_if_needed в imapsync).
 		s.sleepIfNeeded()
 
 		if s.Opts.Delete1 {
 			toDelete1 = append(toDelete1, uid)
+		}
+
+		// --expungeaftereach: expunge после каждого удаления.
+		if s.Opts.ExpungeAfterEach && s.Opts.Delete1 && len(toDelete1) > 0 && !s.Opts.Dry {
+			if _, err := src.Select(srcFolder, true); err == nil {
+				_ = src.Expunge()
+			}
 		}
 
 		if s.Opts.ExitWhenOver > 0 && s.Stats.Get().BytesCopied >= s.Opts.ExitWhenOver {
@@ -453,6 +642,26 @@ func (s *Sync) syncFolder(src, dst *imapx.Conn, srcFolder, dstFolder string) err
 		}
 	}
 
+	// --delete2duplicates: удаляем дубликаты внутри папки host2.
+	if s.Opts.Delete2Duplicates {
+		seen := map[string]bool{}
+		for _, uid := range dstUIDs {
+			info := dstInfo[uid]
+			if info == nil {
+				continue
+			}
+			key := s.identityKey(info)
+			if key == "" {
+				continue
+			}
+			if seen[key] {
+				toDelete2 = append(toDelete2, uid)
+			} else {
+				seen[key] = true
+			}
+		}
+	}
+
 	// Применяем удаления.
 	if len(toDelete1) > 0 && !s.Opts.Dry {
 		if err := src.UidDelete(toDelete1); err != nil {
@@ -462,10 +671,19 @@ func (s *Sync) syncFolder(src, dst *imapx.Conn, srcFolder, dstFolder string) err
 		}
 	}
 	if len(toDelete2) > 0 && !s.Opts.Dry {
-		if err := dst.UidDelete(toDelete2); err != nil {
-			s.Log.Printf("  delete2 %q: %v\n", dstFolder, err)
+		if s.Opts.UidExpunge2 {
+			// UID EXPUNGE (RFC 4315) — удаляет и expunge за один шаг.
+			if err := dst.UidExpunge(toDelete2); err != nil {
+				s.Log.Printf("  uidexpunge2 %q: %v\n", dstFolder, err)
+			} else {
+				s.Stats.AddDeleted2(int64(len(toDelete2)))
+			}
 		} else {
-			s.Stats.AddDeleted2(int64(len(toDelete2)))
+			if err := dst.UidDelete(toDelete2); err != nil {
+				s.Log.Printf("  delete2 %q: %v\n", dstFolder, err)
+			} else {
+				s.Stats.AddDeleted2(int64(len(toDelete2)))
+			}
 		}
 	}
 
@@ -475,7 +693,7 @@ func (s *Sync) syncFolder(src, dst *imapx.Conn, srcFolder, dstFolder string) err
 			_ = src.Expunge()
 		}
 	}
-	if s.Opts.Expunge2 && len(toDelete2) > 0 && !s.Opts.Dry {
+	if s.Opts.Expunge2 && len(toDelete2) > 0 && !s.Opts.Dry && !s.Opts.UidExpunge2 {
 		if _, err := dst.Select(dstFolder, true); err == nil {
 			_ = dst.Expunge()
 		}
@@ -527,7 +745,22 @@ func (s *Sync) copyMessage(src, dst *imapx.Conn, dstFolder string, uid uint32, i
 		return errSkipMess
 	}
 
+	// --truncmess: усечение сообщения до N байт.
+	if s.Opts.Truncmess > 0 {
+		data = truncMessage(data, s.Opts.Truncmess)
+	}
+
 	flags := normalizeFlags(info.Flags)
+
+	// --filterflags: оставляем только стандартные системные и пользовательские флаги.
+	if s.Opts.FilterFlags {
+		flags = filterFlagsStandard(flags)
+	}
+
+	// --regexflag: применяем regex-замены к флагам.
+	if len(s.regexflagRules) > 0 {
+		flags = applyRegexFlag(flags, s.regexflagRules)
+	}
 
 	if s.Opts.AddHeader {
 		data = addHeader(data, "X-IMAPSYNC", "imapsync-go "+options.Version)
@@ -537,13 +770,25 @@ func (s *Sync) copyMessage(src, dst *imapx.Conn, dstFolder string, uid uint32, i
 		return nil
 	}
 
+	// --syncinternaldates: сохраняем INTERNALDATE источника (по умолчанию true).
 	date := info.Date
-	if date.IsZero() {
+	if !s.Opts.SyncInternalDates || date.IsZero() {
 		date = time.Now()
 	}
 	if err := dst.AppendMessage(dstFolder, flags, date, data); err != nil {
 		return fmt.Errorf("APPEND host2 %q: %w", dstFolder, err)
 	}
+
+	// --syncflagsaftercopy: синхронизируем флаги сразу после APPEND.
+	if s.Opts.SyncFlagsAfterCopy && len(flags) > 0 {
+		// После APPEND получаем новый UID на host2.
+		newUIDs, serr := dst.UidSearchAll("")
+		if serr == nil && len(newUIDs) > 0 {
+			newUID := newUIDs[len(newUIDs)-1]
+			_ = dst.UidStoreFlags([]uint32{newUID}, flags)
+		}
+	}
+
 	return nil
 }
 
@@ -565,12 +810,17 @@ func (s *Sync) resyncFlags(dst *imapx.Conn, dstInfo map[uint32]*imapx.HeaderInfo
 }
 
 // identityKey строит ключ идентичности из заголовков. Пустая строка — неидентифицировано.
+// --skipheader: заголовки, совпадающие с регулярным выражением, исключаются из ключа.
 func (s *Sync) identityKey(info *imapx.HeaderInfo) string {
 	if info == nil {
 		return ""
 	}
 	parts := make([]string, 0, len(s.headerKeys))
 	for _, h := range s.headerKeys {
+		// --skipheader: пропускаем заголовки, совпадающие с regex.
+		if s.Opts.SkipHeaderRe != nil && s.Opts.SkipHeaderRe.MatchString(h) {
+			continue
+		}
 		vals := info.Values[h]
 		if len(vals) == 0 {
 			continue
@@ -635,8 +885,12 @@ func (s *Sync) sleepIfNeeded() {
 	}
 	snap := s.Stats.Get()
 	timeSpent := time.Since(s.Stats.StartTime).Seconds()
+	maxsleep := time.Duration(s.Opts.MaxSleep * float64(time.Second))
+	if maxsleep <= 0 {
+		maxsleep = maxSleep
+	}
 	sleep := calcSleep(s.Opts.MaxMessagesPerSecond, s.Opts.MaxBytesPerSecond,
-		s.Opts.MaxBytesAfter, snap.MessagesCopied, snap.BytesCopied, timeSpent, maxSleep)
+		s.Opts.MaxBytesAfter, snap.MessagesCopied, snap.BytesCopied, timeSpent, maxsleep)
 	if sleep > 0 {
 		s.Log.Printf("  sleeping %.2f s\n", sleep)
 		time.Sleep(time.Duration(sleep * float64(time.Second)))
@@ -760,4 +1014,98 @@ func (s *Sync) deleteExtraFolders(src, dst *imapx.Conn, srcFolders, dstFolders [
 		}
 	}
 	return nil
+}
+
+// parseRegexSubs разбирает список Perl-подобных замен вида s/from/to/flags.
+// Поддерживаются разделители: /, |, ,, #, :, @, и т.д. (любой символ после 's').
+// Флаг 'g' означает глобальную замену.
+func parseRegexSubs(subs []string) []regexTransRule {
+	var rules []regexTransRule
+	for _, s := range subs {
+		if len(s) < 3 || s[0] != 's' {
+			continue
+		}
+		delim := s[1]
+		parts := strings.SplitN(s[2:], string(delim), 3)
+		if len(parts) < 2 {
+			continue
+		}
+		from := parts[0]
+		to := parts[1]
+		global := false
+		if len(parts) >= 3 && strings.Contains(parts[2], "g") {
+			global = true
+		}
+		re, err := regexp.Compile(from)
+		if err != nil {
+			continue
+		}
+		rules = append(rules, regexTransRule{from: re, to: to, global: global})
+	}
+	return rules
+}
+
+// applyRegexTrans применяет список правил regextrans2 к имени папки.
+func applyRegexTrans(name string, rules []regexTransRule) string {
+	for _, r := range rules {
+		if r.global {
+			name = r.from.ReplaceAllString(name, r.to)
+		} else {
+			name = r.from.ReplaceAllString(name, r.to)
+		}
+	}
+	return name
+}
+
+// applyRegexFlag применяет правила regexflag к списку флагов.
+func applyRegexFlag(flags []string, rules []regexTransRule) []string {
+	out := make([]string, 0, len(flags))
+	for _, f := range flags {
+		nf := f
+		for _, r := range rules {
+			nf = r.from.ReplaceAllString(nf, r.to)
+		}
+		out = append(out, nf)
+	}
+	return out
+}
+
+// filterFlagsStandard оставляет только стандартные IMAP-флаги (\Seen \Answered
+// \Flagged \Deleted \Draft) и пользовательские флаги без обратного слэша.
+func filterFlagsStandard(flags []string) []string {
+	standard := map[string]bool{
+		imap.SeenFlag:     true,
+		imap.AnsweredFlag: true,
+		imap.FlaggedFlag:  true,
+		imap.DeletedFlag:  true,
+		imap.DraftFlag:    true,
+	}
+	out := make([]string, 0, len(flags))
+	for _, f := range flags {
+		cf := imap.CanonicalFlag(f)
+		if standard[cf] {
+			out = append(out, cf)
+		} else if !strings.HasPrefix(cf, "\\") {
+			// Пользовательский флаг (без \) — оставляем.
+			out = append(out, cf)
+		}
+		// Системные флаги с \, не входящие в стандартный набор — отбрасываем.
+	}
+	return out
+}
+
+// truncMessage ускает сообщение до maxBytes байт (по границе строк).
+func truncMessage(data []byte, maxBytes int64) []byte {
+	if maxBytes <= 0 || int64(len(data)) <= maxBytes {
+		return data
+	}
+	// Ищем последнюю границу строки в пределах maxBytes.
+	cut := int(maxBytes)
+	for cut > 0 && data[cut-1] != '\n' {
+		cut--
+	}
+	if cut == 0 {
+		return data[:maxBytes]
+	}
+	return data[:cut]
 }

@@ -79,7 +79,7 @@ func run(args []string) int {
 	}
 
 	// Журнал.
-	defLog := logging.DefaultLogPath(opts.User1, opts.User2)
+	defLog := logging.DefaultLogPath(opts.User1, opts.User2, opts.Logdir)
 	log, err := logging.New(os.Stdout, opts.Logfile, opts.NoLog, opts.Debug, defLog)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Ошибка журнала:", err)

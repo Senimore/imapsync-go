@@ -252,34 +252,58 @@ go build -o imapsync-go .
 --proxyauth1/2           выполнить PROXYAUTH после логина (требует --authuserN)
 --timeout N              таймаут команды в секундах (0 = без таймаута)
 --useheader H            заголовок для определения дубликатов (повторяется)
+--skipheader RE          исключить заголовки, совпадающие с RE, из ключа идентичности
+--sep1/--sep2            переопределить разделитель иерархии папок host1/host2
+--search1/--search2      критерии IMAP SEARCH для фильтрации UID (UNSEEN, FLAGGED и т.д.)
 --folder F               синхронизировать только папку F (повторяется)
 --folderrec F            синхронизировать F и подпапки (повторяется)
 --subfolder1/2           ограничить синхронизацию подпапкой
 --f1f2 SRC DST           явное отображение папок (повторяется)
 --automap                автоматически отображать одноимённые папки
 --exclude1 P             исключить папки источника по подстроке
+--include RE             включить только папки, совпадающие с regex RE (повторяется)
+--exclude RE             исключить папки, совпадающие с regex RE (повторяется)
+--folderfirst F          синхронизировать папку F в первую очередь (повторяется)
+--folderlast F           синхронизировать папку F в последнюю очередь (повторяется)
+--regextrans2 S          Perl-подобная замена имён папок s/from/to/flags (повторяется)
 --prefix1 P              удалить префикс P из имён папок источника (напр. "INBOX.")
 --prefix2 P              добавить префикс P ко всем папкам назначения (кроме INBOX)
+--useuid                 использовать UID+кэш для распознавания сообщений (подразумевает --usecache)
+--usecache               использовать локальный SQLite-кэш сопоставления UID
+--cachedir DIR           каталог кэша (по умолчанию .imapsync_cache)
 --delete1                удалить из источника после переноса (подразумевает --expunge1)
---delete2                удалить из назначения отсутствующие в источнике
+--delete2                удалить из назначения отсутствующие в источнике (подразумевает --uidexpunge2)
+--delete2duplicates      удалить дубликаты внутри папок host2 (подразумевает --uidexpunge2)
 --delete2folders         удалить папки назначения, отсутствующие в источнике
 --delete1emptyfolders    удалить пустые папки источника
 --subscribe2             подписаться на созданные папки назначения
+--uidexpunge2            использовать UID EXPUNGE (RFC 4315) на host2
+--expungeaftereach       expunge после каждого удаления (по умолчанию)
+--noexpungeaftereach     отключить expunge после каждого удаления
 --skipemptyfolders       пустые папки host1 не создаются на host2 (по умолчанию)
 --noskipemptyfolders     создавать пустые папки host1 на host2
+--skipcrossduplicates    не копировать сообщение, если ключ уже есть в любой папке host2
 --noresyncflags          не пересинхронизировать флаги
+--syncflagsaftercopy     синхронизировать флаги сразу после APPEND
+--filterflags            фильтровать нестандартные системные флаги (по умолчанию)
+--nofilterflags          отключить фильтрацию флагов
+--regexflag S            Perl-подобная замена флагов s/from/to/ (повторяется)
+--syncinternaldates      сохранять INTERNALDATE источника (по умолчанию)
+--nosyncinternaldates    использовать текущую дату при APPEND
 --minsize/--maxsize      фильтр по размеру сообщения (байт)
 --minage/--maxage        фильтр по возрасту сообщения (дней)
+--appendlimit N          пропускать сообщения больше N байт
+--truncmess N            усекать сообщения до N байт
 --skipmess RE            пропустить сообщения, содержимое которых совпадает с RE (повторяется)
 --maxmessagespersecond N ограничить скорость: сообщений в секунду
 --maxbytespersecond N    ограничить скорость: байт в секунду
 --maxbytesafter N        байты, после которых учитывается --maxbytespersecond
+--maxsleep N             максимальная пауза троттлинга в секундах (по умолчанию 2.0)
 --errorsmax N            остановить при достижении N ошибок (по умолчанию 50)
 --dry                    имитация без записи
---justconnect            только подключиться и показать capabilities
---justlogin              только подключиться и залогиниться
---justfolders            только список папок источника
---justfoldersizes        только размеры папок источника
+--dry1                   dry-режим для host1 (по умолчанию при --dry)
+--nodry1               отключить dry1
+--logdir DIR             каталог для файлов журнала (по умолчанию LOG_imapsync)
 --logfile FILE           файл журнала (по умолчанию LOG_imapsync/<stamp>_<u1>_<u2>.txt)
 --nolog                  не писать журнал
 --debug                  подробный вывод
@@ -319,9 +343,11 @@ imapsync-go/
 │   ├── options/options.go       # разбор аргументов в стиле imapsync
 │   ├── imapx/imapx.go           # обёртка go-imap: Connect, Login, Select, Fetch, Append
 │   ├── sync/sync.go             # ядро: обход папок, дедупликация, перенос, флаги
+│   ├── cache/cache.go           # SQLite-кэш для --usecache/--useuid
 │   ├── logging/logging.go       # двойной вывод stdout + файл
 │   └── report/report.go         # сбор статистики, итоговый отчёт
-└── LOG_imapsync/                # журналы запусков (по умолчанию)
+├── LOG_imapsync/                # журналы запусков (по умолчанию)
+└── .imapsync_cache/             # SQLite-кэш (по умолчанию)
 ```
 
 ## Тестирование
