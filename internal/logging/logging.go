@@ -24,10 +24,13 @@ type Logger struct {
 
 // DefaultLogPath формирует путь журнала в стиле imapsync:
 // LOG_imapsync/<stamp>_<user1>_<user2>.txt
-func DefaultLogPath(user1, user2 string) string {
+func DefaultLogPath(user1, user2, logdir string) string {
+	if logdir == "" {
+		logdir = "LOG_imapsync"
+	}
 	stamp := time.Now().Format("2006_01_02_15_04_05_000")
 	name := fmt.Sprintf("%s_%s_%s.txt", stamp, sanitize(user1), sanitize(user2))
-	return filepath.Join("LOG_imapsync", name)
+	return filepath.Join(logdir, name)
 }
 
 func sanitize(s string) string {

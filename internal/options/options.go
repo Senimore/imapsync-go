@@ -33,6 +33,10 @@ type Options struct {
 	AuthUser1, AuthUser2   string
 	ProxyAuth1, ProxyAuth2 bool
 
+	// Разделители и критерии поиска (как в imapsync).
+	Sep1, Sep2       string // переопределение разделителя иерархии папок host1/host2
+	Search1, Search2 string // дополнительные критерии IMAP SEARCH для host1/host2
+
 	// TLS.
 	SSL1, SSL2 bool // imap over TLS (imaps), порт 993 по умолчанию
 	TLS1, TLS2 bool // STARTTLS поверх обычного соединения
@@ -42,7 +46,14 @@ type Options struct {
 	Compress2  bool
 
 	// Идентификация сообщений.
-	UseHeader []string // заголовки для определения дубликатов
+	UseHeader    []string // заголовки для определения дубликатов
+	SkipHeader   string   // регулярное выражение: исключать совпадающие заголовки из ключа идентичности
+	SkipHeaderRe *regexp.Regexp
+
+	// Идентификация по UID и кэширование (--useuid, --usecache).
+	UseUID   bool   // использовать UID вместо заголовков для распознавания сообщений
+	UseCache bool   // использовать локальный кэш сопоставления UID/сообщений
+	CacheDir string // каталог кэша (по умолчанию .imapsync_cache)
 
 	// Отбор папок.
 	Folder     []string // синхронизировать только эти папки (точное имя)
@@ -59,6 +70,15 @@ type Options struct {
 	// --prefix2 — префикс, который добавляется ко всем папкам host2.
 	Prefix1, Prefix2 string
 
+	// Преобразования и фильтры папок (--regextrans2, --include, --exclude, --folderfirst, --folderlast).
+	RegexTrans2 []string // регулярные выражения замены имён папок для host2 (s/from/to/flags)
+	Include     []string // регулярные выражения для включения папок
+	IncludeRe   []*regexp.Regexp
+	Exclude     []string // регулярные выражения для исключения папок
+	ExcludeRe   []*regexp.Regexp
+	FolderFirst []string // синхронизировать эти папки в первую очередь
+	FolderLast  []string // синхронизировать эти папки в последнюю очередь
+
 	// Удаления.
 	Delete1             bool // удалить из источника после переноса
 	Expunge1            bool
@@ -67,12 +87,24 @@ type Options struct {
 	Delete2Folders      bool // удалить папки назначения, отсутствующие в источнике
 	Delete1EmptyFolders bool
 	Subscribe2          bool // подписаться на созданные папки назначения
+	UidExpunge2         bool // использовать UID EXPUNGE на host2 (включается автоматически при --delete2)
+	ExpungeAfterEach    bool // выполнять expunge после каждого удаления (по умолчанию true)
+
+	// Дедупликация и повторные копии.
+	SkipCrossDuplicates bool // не копировать сообщение, если такой ключ уже встречался в ЛЮБОЙ папке host2
+	Delete2Duplicates   bool // удалять дубликаты сообщений внутри папок на host2
 
 	// Пустые папки (как в imapsync: по умолчанию skipemptyfolders = 1).
 	SkipEmptyFolders bool
 
 	// Флаги.
-	NoResyncFlags bool // не пересинхронизировать флаги
+	NoResyncFlags      bool     // не пересинхронизировать флаги
+	SyncFlagsAfterCopy bool     // синхронизировать флаги сразу после APPEND
+	FilterFlags        bool     // фильтровать системные флаги, отбрасывая нестандартные (по умолчанию true)
+	RegexFlag          []string // Perl-like regex замены флагов (s/from/to/)
+
+	// Даты сообщений.
+	SyncInternalDates bool // сохранять INTERNALDATE источника (по умолчанию true)
 
 	// Фильтры сообщений.
 	MinSize, MaxSize int64
@@ -93,6 +125,11 @@ type Options struct {
 	MaxMessagesPerSecond float64
 	MaxBytesPerSecond    int64
 	MaxBytesAfter        int64
+	MaxSleep             float64 // максимальная пауза троттлинга в секундах (по умолчанию 2.0)
+
+	// Ограничение размера и усечение сообщений (--appendlimit, --truncmess).
+	Appendlimit int64 // пропуск сообщений больше N байт (или из APPENDLIMIT сервера)
+	Truncmess   int64 // усекать сообщения до N байт при превышении
 
 	// --errorsmax: максимальное число ошибок, при котором imapsync
 	// останавливается (по умолчанию 50, как в оригинале).
@@ -100,6 +137,7 @@ type Options struct {
 
 	// Режимы.
 	Dry             bool
+	Dry1            bool // true по умолчанию в dry-режиме, --nodry1 отключает пропуск выборки сообщений с host1
 	JustConnect     bool
 	JustLogin       bool
 	JustFolders     bool
@@ -108,6 +146,7 @@ type Options struct {
 
 	// Прочее.
 	Logfile      string
+	Logdir       string // каталог журнала по умолчанию (LOG_imapsync)
 	NoLog        bool
 	Debug        bool
 	DebugImap    bool
@@ -123,13 +162,18 @@ type Options struct {
 // New возвращает Options со значениями по умолчанию, как в imapsync.
 func New() *Options {
 	return &Options{
-		UseHeader:        []string{"Message-Id", "Received"},
-		AuthMech1:        "LOGIN",
-		AuthMech2:        "LOGIN",
-		TimeoutSec:       0,
-		Threads:          1,
-		SkipEmptyFolders: true,
-		ErrorsMax:        50, // $ERRORS_MAX в imapsync
+		UseHeader:         []string{"Message-Id", "Received"},
+		AuthMech1:         "LOGIN",
+		AuthMech2:         "LOGIN",
+		TimeoutSec:        0,
+		Threads:           1,
+		SkipEmptyFolders:  true,
+		ErrorsMax:         50,  // $ERRORS_MAX в imapsync
+		MaxSleep:          2.0, // $MAX_SLEEP в imapsync = 2 сек
+		SyncInternalDates: true,
+		FilterFlags:       true,
+		ExpungeAfterEach:  true,
+		Dry1:              true, // синхронизируется с Dry при Parse
 	}
 }
 
@@ -274,6 +318,31 @@ func Parse(args []string) (*Options, error) {
 		case "proxyauth2":
 			o.ProxyAuth2 = true
 
+		case "sep1":
+			v, e := get()
+			if e != nil {
+				return nil, e
+			}
+			o.Sep1 = v
+		case "sep2":
+			v, e := get()
+			if e != nil {
+				return nil, e
+			}
+			o.Sep2 = v
+		case "search1":
+			v, e := get()
+			if e != nil {
+				return nil, e
+			}
+			o.Search1 = v
+		case "search2":
+			v, e := get()
+			if e != nil {
+				return nil, e
+			}
+			o.Search2 = v
+
 		case "ssl1":
 			o.SSL1 = true
 		case "ssl2":
@@ -305,6 +374,31 @@ func Parse(args []string) (*Options, error) {
 				return nil, e
 			}
 			o.UseHeader = append(o.UseHeader, v)
+		case "skipheader":
+			v, e := get()
+			if e != nil {
+				return nil, e
+			}
+			re, err := regexp.Compile("(?i)" + v)
+			if err != nil {
+				return nil, fmt.Errorf("некорректное регулярное выражение в --skipheader %q: %w", v, err)
+			}
+			o.SkipHeader = v
+			o.SkipHeaderRe = re
+		case "useuid":
+			o.UseUID = true
+		case "nouseuid":
+			o.UseUID = false
+		case "usecache":
+			o.UseCache = true
+		case "nousecache":
+			o.UseCache = false
+		case "cachedir":
+			v, e := get()
+			if e != nil {
+				return nil, e
+			}
+			o.CacheDir = v
 		case "folder":
 			v, e := get()
 			if e != nil {
@@ -366,6 +460,47 @@ func Parse(args []string) (*Options, error) {
 			}
 			o.Prefix2 = v
 
+		case "regextrans2":
+			v, e := get()
+			if e != nil {
+				return nil, e
+			}
+			o.RegexTrans2 = append(o.RegexTrans2, v)
+		case "include":
+			v, e := get()
+			if e != nil {
+				return nil, e
+			}
+			re, err := regexp.Compile(v)
+			if err != nil {
+				return nil, fmt.Errorf("некорректное регулярное выражение в --include %q: %w", v, err)
+			}
+			o.Include = append(o.Include, v)
+			o.IncludeRe = append(o.IncludeRe, re)
+		case "exclude":
+			v, e := get()
+			if e != nil {
+				return nil, e
+			}
+			re, err := regexp.Compile(v)
+			if err != nil {
+				return nil, fmt.Errorf("некорректное регулярное выражение в --exclude %q: %w", v, err)
+			}
+			o.Exclude = append(o.Exclude, v)
+			o.ExcludeRe = append(o.ExcludeRe, re)
+		case "folderfirst":
+			v, e := get()
+			if e != nil {
+				return nil, e
+			}
+			o.FolderFirst = append(o.FolderFirst, v)
+		case "folderlast":
+			v, e := get()
+			if e != nil {
+				return nil, e
+			}
+			o.FolderLast = append(o.FolderLast, v)
+
 		case "delete1":
 			o.Delete1 = true
 		case "expunge1":
@@ -380,9 +515,39 @@ func Parse(args []string) (*Options, error) {
 			o.Delete1EmptyFolders = true
 		case "subscribe2":
 			o.Subscribe2 = true
+		case "uidexpunge2":
+			o.UidExpunge2 = true
+		case "nouidexpunge2":
+			o.UidExpunge2 = false
+		case "expungeaftereach":
+			o.ExpungeAfterEach = true
+		case "noexpungeaftereach":
+			o.ExpungeAfterEach = false
+
+		case "skipcrossduplicates":
+			o.SkipCrossDuplicates = true
+		case "delete2duplicates":
+			o.Delete2Duplicates = true
 
 		case "noresyncflags":
 			o.NoResyncFlags = true
+		case "syncflagsaftercopy":
+			o.SyncFlagsAfterCopy = true
+		case "filterflags":
+			o.FilterFlags = true
+		case "nofilterflags":
+			o.FilterFlags = false
+		case "regexflag":
+			v, e := get()
+			if e != nil {
+				return nil, e
+			}
+			o.RegexFlag = append(o.RegexFlag, v)
+
+		case "syncinternaldates":
+			o.SyncInternalDates = true
+		case "nosyncinternaldates":
+			o.SyncInternalDates = false
 
 		case "minsize":
 			v, e := get()
@@ -473,6 +638,36 @@ func Parse(args []string) (*Options, error) {
 				return nil, e2
 			}
 			o.MaxBytesAfter = n
+		case "maxsleep":
+			v, e := get()
+			if e != nil {
+				return nil, e
+			}
+			f, e2 := strconv.ParseFloat(v, 64)
+			if e2 != nil {
+				return nil, e2
+			}
+			o.MaxSleep = f
+		case "appendlimit":
+			v, e := get()
+			if e != nil {
+				return nil, e
+			}
+			n, e2 := strconv.ParseInt(v, 10, 64)
+			if e2 != nil {
+				return nil, e2
+			}
+			o.Appendlimit = n
+		case "truncmess":
+			v, e := get()
+			if e != nil {
+				return nil, e
+			}
+			n, e2 := strconv.ParseInt(v, 10, 64)
+			if e2 != nil {
+				return nil, e2
+			}
+			o.Truncmess = n
 		case "errorsmax":
 			v, e := get()
 			if e != nil {
@@ -486,6 +681,11 @@ func Parse(args []string) (*Options, error) {
 
 		case "dry":
 			o.Dry = true
+			o.Dry1 = true
+		case "dry1":
+			o.Dry1 = true
+		case "nodry1":
+			o.Dry1 = false
 		case "justconnect":
 			o.JustConnect = true
 		case "justlogin":
@@ -503,6 +703,12 @@ func Parse(args []string) (*Options, error) {
 				return nil, e
 			}
 			o.Logfile = v
+		case "logdir":
+			v, e := get()
+			if e != nil {
+				return nil, e
+			}
+			o.Logdir = v
 		case "nolog":
 			o.NoLog = true
 		case "debug":
@@ -551,6 +757,16 @@ func Parse(args []string) (*Options, error) {
 		o.Expunge1 = true
 	}
 
+	// --delete2 и --delete2duplicates подразумевают --uidexpunge2 (как в imapsync).
+	if o.Delete2 || o.Delete2Duplicates {
+		o.UidExpunge2 = true
+	}
+
+	// --useuid подразумевает --usecache (если не отключен явно через nousecache).
+	if o.UseUID {
+		o.UseCache = true
+	}
+
 	// Как в imapsync: authmech по умолчанию = PLAIN, если задан authuser,
 	// иначе LOGIN (но только когда authmech не задан явно).
 	if o.AuthUser1 != "" && !authmech1Set {
@@ -581,6 +797,10 @@ func (o *Options) Validate() error {
 	if o.ErrorsMax <= 0 {
 		return fmt.Errorf("--errorsmax должно быть больше нуля")
 	}
+	// Конфликт в imapsync: "can not have both --usecache and --skipcrossduplicates"
+	if o.UseCache && o.SkipCrossDuplicates {
+		return fmt.Errorf("нельзя одновременно использовать --usecache и --skipcrossduplicates")
+	}
 	return nil
 }
 
@@ -605,33 +825,57 @@ func Usage() string {
   --proxyauth1/2       выполнить PROXYAUTH после логина (требует --authuserN)
   --timeout N          таймаут команды в секундах (0 = без таймаута)
   --useheader H        заголовок для определения дубликатов (повторяется)
+  --skipheader RE      исключить заголовки, совпадающие с RE, из ключа идентичности
+  --sep1/--sep2        переопределить разделитель иерархии папок host1/host2
+  --search1/--search2  критерии IMAP SEARCH для фильтрации UID (UNSEEN, FLAGGED и т.д.)
   --folder F           синхронизировать только папку F (повторяется)
   --folderrec F        синхронизировать F и подпапки (повторяется)
   --subfolder1/2       ограничить синхронизацию подпапкой
   --f1f2 SRC DST       явное отображение папок (повторяется)
   --automap            автоматически отображать одноимённые папки
   --exclude1 P         исключить папки источника по подстроке
+  --include RE         включить только папки, совпадающие с regex RE (повторяется)
+  --exclude RE         исключить папки, совпадающие с regex RE (повторяется)
+  --folderfirst F      синхронизировать папку F в первую очередь (повторяется)
+  --folderlast F       синхронизировать папку F в последнюю очередь (повторяется)
+  --regextrans2 S      Perl-подобная замена имён папок s/from/to/flags (повторяется)
   --prefix1 P          удалить префикс P из имён папок источника (напр. "INBOX.")
   --prefix2 P          добавить префикс P ко всем папкам назначения
+  --useuid             использовать UID+кэш для распознавания сообщений (подразумевает --usecache)
+  --usecache           использовать локальный SQLite-кэш сопоставления UID
+  --cachedir DIR       каталог кэша (по умолчанию .imapsync_cache)
   --delete1            удалить из источника после переноса (подразумевает --expunge1)
-  --delete2            удалить из назначения отсутствующие в источнике
+  --delete2            удалить из назначения отсутствующие в источнике (подразумевает --uidexpunge2)
+  --delete2duplicates  удалить дубликаты внутри папок host2 (подразумевает --uidexpunge2)
   --delete2folders     удалить папки назначения, отсутствующие в источнике
   --subscribe2         подписаться на созданные папки назначения
+  --uidexpunge2        использовать UID EXPUNGE (RFC 4315) на host2
+  --expungeaftereach   expunge после каждого удаления (по умолчанию)
+  --noexpungeaftereach отключить expunge после каждого удаления
   --skipemptyfolders   пустые папки host1 не создаются на host2 (по умолчанию)
   --noskipemptyfolders создавать пустые папки host1 на host2
+  --skipcrossduplicates не копировать сообщение, если ключ уже есть в любой папке host2
   --noresyncflags      не пересинхронизировать флаги
+  --syncflagsaftercopy синхронизировать флаги сразу после APPEND
+  --filterflags        фильтровать нестандартные системные флаги (по умолчанию)
+  --nofilterflags      отключить фильтрацию флагов
+  --regexflag S        Perl-подобная замена флагов s/from/to/ (повторяется)
+  --syncinternaldates  сохранять INTERNALDATE источника (по умолчанию)
+  --nosyncinternaldates использовать текущую дату при APPEND
   --minsize/--maxsize  фильтр по размеру сообщения (байт)
   --minage/--maxage    фильтр по возрасту сообщения (дней)
+  --appendlimit N      пропускать сообщения больше N байт
+  --truncmess N        усекать сообщения до N байт
   --skipmess RE        пропустить сообщения, содержимое которых совпадает с RE (повторяется)
   --maxmessagespersecond N  ограничить скорость: сообщений в секунду
   --maxbytespersecond  N  ограничить скорость: байт в секунду
   --maxbytesafter N    байты, после которых учитывается --maxbytespersecond
+  --maxsleep N         максимальная пауза троттлинга в секундах (по умолчанию 2.0)
   --errorsmax N        остановить при достижении N ошибок (по умолчанию 50)
   --dry                имитация без записи
-  --justconnect        только подключиться и показать capabilities
-  --justlogin          только подключиться и залогиниться
-  --justfolders        только список папок источника
-  --justfoldersizes    только размеры папок источника
+  --dry1               dry-режим для host1 (по умолчанию при --dry)
+  --nodry1             отключить dry1
+  --logdir DIR         каталог для файлов журнала (по умолчанию LOG_imapsync)
   --logfile FILE       файл журнала (по умолчанию LOG_imapsync/<stamp>_<u1>_<u2>.txt)
   --nolog              не писать журнал
   --debug              подробный вывод

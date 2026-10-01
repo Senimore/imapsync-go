@@ -249,10 +249,58 @@ func (c *Conn) DeleteFolder(name string) error {
 	return c.Client.Delete(name)
 }
 
-// UidSearchAll возвращает все UID в текущей открытой папке.
-func (c *Conn) UidSearchAll() ([]uint32, error) {
+// UidSearchAll возвращает все UID в текущей открытой папке с учётом критерия (если задан).
+func (c *Conn) UidSearchAll(criteriaStr string) ([]uint32, error) {
 	crit := imap.NewSearchCriteria()
+	if criteriaStr != "" {
+		parts := strings.Fields(criteriaStr)
+		for _, p := range parts {
+			up := strings.ToUpper(p)
+			switch up {
+			case "ALL":
+				// по умолчанию
+			case "SEEN":
+				crit.WithFlags = append(crit.WithFlags, imap.SeenFlag)
+			case "UNSEEN":
+				crit.WithoutFlags = append(crit.WithoutFlags, imap.SeenFlag)
+			case "FLAGGED":
+				crit.WithFlags = append(crit.WithFlags, imap.FlaggedFlag)
+			case "UNFLAGGED":
+				crit.WithoutFlags = append(crit.WithoutFlags, imap.FlaggedFlag)
+			case "ANSWERED":
+				crit.WithFlags = append(crit.WithFlags, imap.AnsweredFlag)
+			case "UNANSWERED":
+				crit.WithoutFlags = append(crit.WithoutFlags, imap.AnsweredFlag)
+			case "DRAFT":
+				crit.WithFlags = append(crit.WithFlags, imap.DraftFlag)
+			case "UNDRAFT":
+				crit.WithoutFlags = append(crit.WithoutFlags, imap.DraftFlag)
+			case "DELETED":
+				crit.WithFlags = append(crit.WithFlags, imap.DeletedFlag)
+			case "UNDELETED":
+				crit.WithoutFlags = append(crit.WithoutFlags, imap.DeletedFlag)
+			}
+		}
+	}
 	return c.Client.UidSearch(crit)
+}
+
+// UidExpunge выполняет UID EXPUNGE для списка UID (RFC 4315), если поддерживается сервером.
+func (c *Conn) UidExpunge(uids []uint32) error {
+	if len(uids) == 0 {
+		return nil
+	}
+	set := &imap.SeqSet{}
+	set.AddNum(uids...)
+	cmd := &imap.Command{
+		Name:      "UID EXPUNGE",
+		Arguments: []interface{}{set},
+	}
+	status, err := c.Client.Execute(cmd, nil)
+	if err != nil {
+		return err
+	}
+	return status.Err()
 }
 
 // UidSearchByHeader ищет сообщения, содержащие указанный заголовок
