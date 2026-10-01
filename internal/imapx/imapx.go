@@ -111,8 +111,30 @@ func Connect(host string, port int, ssl, tlsStart, insecure bool, timeout time.D
 }
 
 // Login выполняет аутентификацию выбранным механизмом.
-func (c *Conn) Login(user, password, mech string) error {
+//
+// authUser/proxyAuth соответствуют --authuserN/--proxyauthN в imapsync:
+//
+//	--proxyauthN: логинимся под authUser (LOGIN), затем отправляем
+//	PROXYAUTH <user> (Cyrus-style proxy authentication);
+//	PLAIN с authUser: SASL PLAIN с authorization id = authUser
+//	(identity\x00user\x00password), как делает imapsync (plainauth).
+func (c *Conn) Login(user, password, mech, authUser string, proxyAuth bool) error {
 	c.User = user
+
+	// proxyauth: аутентификация под admin-пользователем, затем PROXYAUTH.
+	if proxyAuth {
+		if authUser == "" {
+			return fmt.Errorf("proxyauth требует authuser")
+		}
+		if err := c.Client.Login(authUser, password); err != nil {
+			return fmt.Errorf("логин %s@%s (proxyauth под %s): %w", user, c.Host, authUser, err)
+		}
+		if err := c.ProxyAuth(user); err != nil {
+			return fmt.Errorf("PROXYAUTH %s@%s под %s: %w", user, c.Host, authUser, err)
+		}
+		return nil
+	}
+
 	switch strings.ToUpper(mech) {
 	case "XOAUTH2":
 		xo := &XOAuth2Client{User: user, Token: password}
@@ -131,12 +153,36 @@ func (c *Conn) Login(user, password, mech string) error {
 			return fmt.Errorf("OAUTHBEARER-логин %s@%s: %w", user, c.Host, err)
 		}
 		return nil
-	default: // LOGIN / PLAIN
+	case "PLAIN":
+		// SASL PLAIN: identity = authUser (admin), username = user.
+		pc := sasl.NewPlainClient(authUser, user, password)
+		if err := c.Client.Authenticate(pc); err != nil {
+			return fmt.Errorf("PLAIN-логин %s@%s (authuser %q): %w", user, c.Host, authUser, err)
+		}
+		return nil
+	default: // LOGIN
 		if err := c.Client.Login(user, password); err != nil {
 			return fmt.Errorf("логин %s@%s: %w", user, c.Host, err)
 		}
 		return nil
 	}
+}
+
+// ProxyAuth отправляет команду PROXYAUTH <user> (Cyrus IMAP).
+// Используется после логина под admin-пользователем (--proxyauthN).
+func (c *Conn) ProxyAuth(user string) error {
+	cmd := &imap.Command{
+		Name:      "PROXYAUTH",
+		Arguments: []interface{}{user},
+	}
+	status, err := c.Client.Execute(cmd, nil)
+	if err != nil {
+		return err
+	}
+	if err := status.Err(); err != nil {
+		return err
+	}
+	return nil
 }
 
 // Logout корректно закрывает соединение.

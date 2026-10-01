@@ -7,11 +7,12 @@
 ## Возможности
 
 - **Соединения**: SSL/TLS (порт 993), STARTTLS (порт 143), plain; `--ssl-insecure` для самоподписанных сертификатов.
-- **Аутентификация**: `LOGIN` (по умолчанию), `XOAUTH2`, `OAUTHBEARER`.
-- **Отбор папок**: `--folder`, `--folderrec`, `--subfolder1/2`, `--f1f2`, `--automap`, `--exclude1`.
+- **Аутентификация**: `LOGIN` (по умолчанию), `PLAIN` (с `--authuserN`), `XOAUTH2`, `OAUTHBEARER`; админ-аутентификация `--authuser1/2` и Cyrus `PROXYAUTH` (`--proxyauth1/2`).
+- **Отбор папок**: `--folder`, `--folderrec`, `--subfolder1/2`, `--f1f2`, `--automap`, `--exclude1`, `--prefix1`, `--prefix2`.
 - **Дедупликация**: по заголовкам `--useheader` (по умолчанию `Message-Id` + `Received`).
 - **Флаги**: пересинхронизация флагов (`--noresyncflags` для отключения).
-- **Фильтры**: `--minsize`, `--maxsize`, `--minage`, `--maxage`.
+- **Фильтры**: `--minsize`, `--maxsize`, `--minage`, `--maxage`, `--skipmess` (regex по содержимому).
+- **Ограничения**: `--maxmessagespersecond`, `--maxbytespersecond` (+ `--maxbytesafter`), `--errorsmax`, `--exitwhenover`.
 - **Удаления**: `--delete1`, `--delete2`, `--delete2folders`, `--delete1emptyfolders`, `--expunge1`, `--expunge2`.
 - **Пустые папки**: `--skipemptyfolders` (по умолчанию) / `--noskipemptyfolders`.
 - **Параллелизм**: `--threads N` (каждая горутина получает свою пару соединений).
@@ -166,6 +167,75 @@ go build -o imapsync-go .
   --host2 imap.example.com --user2 b --password2 p2 --ssl2
 ```
 
+### Админ-аутентификация (--authuser1/--authuser2)
+
+Логин под админ-учёткой с SASL `PLAIN` (authzid = `--authuserN`), доступ к чужому ящику. Как в imapsync, `--authuserN` по умолчанию включает `PLAIN` вместо `LOGIN`:
+
+```sh
+./imapsync-go \
+  --host1 imap.example.com --user1 alice --password1 'adminpass' \
+  --authuser1 admin --ssl1 \
+  --host2 imap.example.com --user2 bob --password2 'adminpass' \
+  --authuser2 admin --ssl2
+```
+
+### Cyrus PROXYAUTH (--proxyauth1/--proxyauth2)
+
+Логин под админом через `LOGIN`, затем `PROXYAUTH <user>` (сервер Cyrus). Требует `--authuserN`:
+
+```sh
+./imapsync-go \
+  --host1 imap.example.com --user1 alice --password1 'adminpass' \
+  --authuser1 admin --proxyauth1 --ssl1 \
+  --host2 imap.example.com --user2 bob --password2 'adminpass' \
+  --authuser2 admin --proxyauth2 --ssl2
+```
+
+### Префиксы папок (--prefix1/--prefix2)
+
+`--prefix1` удаляет префикс из имён папок источника, `--prefix2` добавляет префикс ко всем папкам назначения (кроме `INBOX`), как `prefix_seperator_invertion` в imapsync:
+
+```sh
+./imapsync-go \
+  --host1 imap.src.ru --user1 a --password1 p1 --ssl1 \
+  --host2 imap.dst.ru --user2 b --password2 p2 --ssl2 \
+  --prefix1 "INBOX." --prefix2 "INBOX/"
+```
+
+`INBOX.Archive` с host1 попадёт в `INBOX/Archive` на host2; `INBOX` останется `INBOX`.
+
+### Пропуск сообщений по regex (--skipmess)
+
+Сообщения, полное содержимое которых совпадает с регулярным выражением, не переносятся (счётчик `skipped(regex)` в отчёте). Опция повторяется:
+
+```sh
+./imapsync-go \
+  --host1 imap.src.ru --user1 a --password1 p1 --ssl1 \
+  --host2 imap.dst.ru --user2 b --password2 p2 --ssl2 \
+  --skipmess 'X-Spam-Flag: YES' --skipmess '^From:.*newsletter'
+```
+
+### Ограничение скорости (--maxmessagespersecond/--maxbytespersecond)
+
+Как `sleep_if_needed` в imapsync: после каждого перенесённого сообщения при необходимости выполняется пауза (не более 2 с):
+
+```sh
+./imapsync-go \
+  --host1 imap.src.ru --user1 a --password1 p1 --ssl1 \
+  --host2 imap.dst.ru --user2 b --password2 p2 --ssl2 \
+  --maxmessagespersecond 2 --maxbytespersecond 2000 --maxbytesafter 4000
+```
+
+`--maxbytesafter N` — первые N байт не учитываются при подсчёте байт-троттлинга.
+
+### Остановка по числу ошибок (--errorsmax)
+
+При достижении `N` ошибок синхронизация останавливается (по умолчанию 50, как `$ERRORS_MAX` в imapsync):
+
+```sh
+./imapsync-go ... --errorsmax 100
+```
+
 ## Справочник опций
 
 ```
@@ -176,7 +246,10 @@ go build -o imapsync-go .
 --ssl1/--ssl2            imap over TLS (imaps)
 --tls1/--tls2            STARTTLS
 --ssl-insecure           не проверять TLS-сертификат
---authmech1/2            LOGIN (по умолчанию) или XOAUTH2
+--authmech1/2            LOGIN (по умолчанию), PLAIN, XOAUTH2, OAUTHBEARER
+--authuser1/2            пользователь для аутентификации (admin user);
+                         по умолчанию включает PLAIN вместо LOGIN
+--proxyauth1/2           выполнить PROXYAUTH после логина (требует --authuserN)
 --timeout N              таймаут команды в секундах (0 = без таймаута)
 --useheader H            заголовок для определения дубликатов (повторяется)
 --folder F               синхронизировать только папку F (повторяется)
@@ -185,6 +258,8 @@ go build -o imapsync-go .
 --f1f2 SRC DST           явное отображение папок (повторяется)
 --automap                автоматически отображать одноимённые папки
 --exclude1 P             исключить папки источника по подстроке
+--prefix1 P              удалить префикс P из имён папок источника (напр. "INBOX.")
+--prefix2 P              добавить префикс P ко всем папкам назначения (кроме INBOX)
 --delete1                удалить из источника после переноса (подразумевает --expunge1)
 --delete2                удалить из назначения отсутствующие в источнике
 --delete2folders         удалить папки назначения, отсутствующие в источнике
@@ -195,6 +270,11 @@ go build -o imapsync-go .
 --noresyncflags          не пересинхронизировать флаги
 --minsize/--maxsize      фильтр по размеру сообщения (байт)
 --minage/--maxage        фильтр по возрасту сообщения (дней)
+--skipmess RE            пропустить сообщения, содержимое которых совпадает с RE (повторяется)
+--maxmessagespersecond N ограничить скорость: сообщений в секунду
+--maxbytespersecond N    ограничить скорость: байт в секунду
+--maxbytesafter N        байты, после которых учитывается --maxbytespersecond
+--errorsmax N            остановить при достижении N ошибок (по умолчанию 50)
 --dry                    имитация без записи
 --justconnect            только подключиться и показать capabilities
 --justlogin              только подключиться и залогиниться

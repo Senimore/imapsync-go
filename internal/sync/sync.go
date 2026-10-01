@@ -9,7 +9,9 @@
 package sync
 
 import (
+	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"strings"
 	"sync"
@@ -119,6 +121,9 @@ func (s *Sync) Run() error {
 				runErr = firstErr(runErr, err)
 				s.Stats.AddErrors(1)
 				s.Log.Printf("ОШИБКА синхронизации %q -> %q: %v\n", sf.Name, dstName, err)
+				if s.checkErrorsMax() {
+					break
+				}
 			}
 		}
 	} else {
@@ -148,6 +153,7 @@ func (s *Sync) Run() error {
 					errMu.Unlock()
 					s.Stats.AddErrors(1)
 					s.Log.Printf("ОШИБКА подключения для %q: %v\n", srcFolder, cerr)
+					s.checkErrorsMax()
 					return
 				}
 				defer src.Logout()
@@ -158,6 +164,7 @@ func (s *Sync) Run() error {
 					errMu.Unlock()
 					s.Stats.AddErrors(1)
 					s.Log.Printf("ОШИБКА синхронизации %q -> %q: %v\n", srcFolder, dstFolder, err)
+					s.checkErrorsMax()
 				}
 			}(sf.Name, dstName)
 		}
@@ -259,10 +266,20 @@ func (s *Sync) folderSelected(name, delim string) bool {
 }
 
 // mapFolder вычисляет имя папки назначения.
+//
+// Соответствует prefix_seperator_invertion() из imapsync:
+//  1. удалить --prefix1 из начала имени папки источника;
+//  2. заменить разделитель источника на разделитель назначения;
+//  3. добавить --prefix2 ко всем папкам host2, кроме INBOX.
 func (s *Sync) mapFolder(srcName, srcDelim, dstDelim string, f1f2 map[string]string) string {
 	canon := imap.CanonicalMailboxName(srcName)
 	if mapped, ok := f1f2[canon]; ok {
 		return mapped
+	}
+	name := srcName
+	// --prefix1: удалить префикс (обычно "INBOX." или "INBOX/").
+	if s.Opts.Prefix1 != "" {
+		name = strings.TrimPrefix(name, s.Opts.Prefix1)
 	}
 	// subfolder1 -> subfolder2
 	if s.Opts.Subfolder1 != "" && s.Opts.Subfolder2 != "" {
@@ -273,7 +290,12 @@ func (s *Sync) mapFolder(srcName, srcDelim, dstDelim string, f1f2 map[string]str
 		}
 	}
 	// automap / по умолчанию: то же имя (с учётом разделителя назначения).
-	return convertDelim(srcName, srcDelim, dstDelim)
+	out := convertDelim(name, srcDelim, dstDelim)
+	// --prefix2: добавить префикс ко всем папкам host2, кроме INBOX.
+	if s.Opts.Prefix2 != "" && imap.CanonicalMailboxName(out) != imap.CanonicalMailboxName(imap.InboxName) {
+		out = s.Opts.Prefix2 + out
+	}
+	return out
 }
 
 // convertDelim меняет разделитель пути папки.
@@ -386,12 +408,21 @@ func (s *Sync) syncFolder(src, dst *imapx.Conn, srcFolder, dstFolder string) err
 
 		// Переносим сообщение.
 		if err := s.copyMessage(src, dst, dstFolder, uid, info); err != nil {
+			if errors.Is(err, errSkipMess) {
+				s.Stats.AddMessagesSkippedRegex(1)
+				s.Log.Printf("  пропуск UID %d (%q): совпадение с --skipmess\n", uid, srcFolder)
+				continue
+			}
 			s.Log.Printf("  пропуск UID %d (%q): %v\n", uid, srcFolder, err)
 			s.Stats.AddErrors(1)
+			s.checkErrorsMax()
 			continue
 		}
 		s.Stats.AddMessagesCopied(1)
 		s.Stats.AddBytes(int64(info.Size))
+
+		// --maxmessagespersecond/--maxbytespersecond (как sleep_if_needed в imapsync).
+		s.sleepIfNeeded()
 
 		if s.Opts.Delete1 {
 			toDelete1 = append(toDelete1, uid)
@@ -480,11 +511,20 @@ func (s *Sync) ensureDstFolder(dst *imapx.Conn, dstFolder string) error {
 	return nil
 }
 
+// errSkipMess — сообщение пропущено по --skipmess (не является ошибкой).
+var errSkipMess = errors.New("skipmess")
+
 // copyMessage переносит одно сообщение с host1 на host2.
 func (s *Sync) copyMessage(src, dst *imapx.Conn, dstFolder string, uid uint32, info *imapx.HeaderInfo) error {
 	data, _, err := src.FetchRfc822(uid)
 	if err != nil {
 		return err
+	}
+
+	// --skipmess: пропускаем сообщения, полное содержимое которых
+	// совпадает с любым из заданных регулярных выражений (как в imapsync).
+	if s.matchSkipMess(data) {
+		return errSkipMess
 	}
 
 	flags := normalizeFlags(info.Flags)
@@ -541,6 +581,79 @@ func (s *Sync) identityKey(info *imapx.HeaderInfo) string {
 		return ""
 	}
 	return strings.Join(parts, "|")
+}
+
+// matchSkipMess проверяет содержимое сообщения по --skipmess.
+func (s *Sync) matchSkipMess(data []byte) bool {
+	for _, re := range s.Opts.SkipMessRe {
+		if re.Match(data) {
+			return true
+		}
+	}
+	return false
+}
+
+// maxSleep — верхняя граница паузы троттлинга ($MAX_SLEEP в imapsync = 2 с).
+const maxSleep = 2 * time.Second
+
+// calcSleep вычисляет длительность паузы троттлинга в секундах
+// (sleep_if_needed в imapsync):
+//
+//	sleep = min(maxsleep, max(nbMsgTransferred/maxMsgPerSec,
+//	(max(totalBytes - maxbytesafter, 0))/maxBytesPerSec) - времяСНачала)
+func calcSleep(maxMsgPerSec float64, maxBytesPerSec int64, maxBytesAfter int64,
+	nbMsgs int64, totalBytes int64, timeSpent float64, maxsleep time.Duration) float64 {
+	sleepMsgs := 0.0
+	if maxMsgPerSec > 0 {
+		sleepMsgs = float64(nbMsgs)/maxMsgPerSec - timeSpent
+		if sleepMsgs < 0 {
+			sleepMsgs = 0
+		}
+	}
+	sleepBytes := 0.0
+	if maxBytesPerSec > 0 {
+		consider := float64(totalBytes) - float64(maxBytesAfter)
+		if consider < 0 {
+			consider = 0
+		}
+		sleepBytes = consider/float64(maxBytesPerSec) - timeSpent
+		if sleepBytes < 0 {
+			sleepBytes = 0
+		}
+	}
+	sleep := math.Max(sleepMsgs, sleepBytes)
+	if sleep > maxsleep.Seconds() {
+		sleep = maxsleep.Seconds()
+	}
+	return sleep
+}
+
+// sleepIfNeeded реализует --maxmessagespersecond/--maxbytespersecond.
+func (s *Sync) sleepIfNeeded() {
+	if s.Opts.MaxMessagesPerSecond <= 0 && s.Opts.MaxBytesPerSecond <= 0 {
+		return
+	}
+	snap := s.Stats.Get()
+	timeSpent := time.Since(s.Stats.StartTime).Seconds()
+	sleep := calcSleep(s.Opts.MaxMessagesPerSecond, s.Opts.MaxBytesPerSecond,
+		s.Opts.MaxBytesAfter, snap.MessagesCopied, snap.BytesCopied, timeSpent, maxSleep)
+	if sleep > 0 {
+		s.Log.Printf("  sleeping %.2f s\n", sleep)
+		time.Sleep(time.Duration(sleep * float64(time.Second)))
+	}
+}
+
+// checkErrorsMax останавливает синхронизацию при достижении --errorsmax
+// (в imapsync: nb_errors >= errorsmax -> выход). Возвращает true, если
+// лимит достигнут.
+func (s *Sync) checkErrorsMax() bool {
+	if s.Stats.Get().Errors < int64(s.Opts.ErrorsMax) {
+		return false
+	}
+	s.Log.Printf("Maximum number of errors %d reached ( you can change %d to any value, for example 100 with --errorsmax 100 ). Exiting.\n",
+		s.Opts.ErrorsMax, s.Opts.ErrorsMax)
+	s.Abort()
+	return true
 }
 
 // passFilters применяет minsize/maxsize/minage/maxage.

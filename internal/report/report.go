@@ -18,6 +18,7 @@ type Stats struct {
 
 	MessagesCopied       int64
 	MessagesSkipped      int64 // дубликаты (уже есть на host2)
+	MessagesSkippedRegex int64 // пропущено по --skipmess
 	MessagesDeleted1     int64
 	MessagesDeleted2     int64
 	MessagesFlagged      int64
@@ -50,16 +51,17 @@ func (s *Stats) Inc(field *int64) { s.add(field, 1) }
 func (s *Stats) Add(field *int64, n int64) { s.add(field, n) }
 
 // Convenience-обёртки для счётчиков.
-func (s *Stats) AddMessagesCopied(n int64)  { s.add(&s.MessagesCopied, n) }
-func (s *Stats) AddMessagesSkipped(n int64) { s.add(&s.MessagesSkipped, n) }
-func (s *Stats) AddMessagesFlagged(n int64) { s.add(&s.MessagesFlagged, n) }
-func (s *Stats) AddUnidentified(n int64)    { s.add(&s.MessagesUnidentified, n) }
-func (s *Stats) AddDeleted1(n int64)        { s.add(&s.MessagesDeleted1, n) }
-func (s *Stats) AddDeleted2(n int64)        { s.add(&s.MessagesDeleted2, n) }
-func (s *Stats) AddErrors(n int64)          { s.add(&s.Errors, n) }
-func (s *Stats) AddFoldersSynced(n int64)   { s.add(&s.FoldersSynced, n) }
-func (s *Stats) AddFoldersCreated(n int64)  { s.add(&s.FoldersCreated, n) }
-func (s *Stats) AddFoldersDeleted(n int64)  { s.add(&s.FoldersDeleted, n) }
+func (s *Stats) AddMessagesCopied(n int64)       { s.add(&s.MessagesCopied, n) }
+func (s *Stats) AddMessagesSkipped(n int64)      { s.add(&s.MessagesSkipped, n) }
+func (s *Stats) AddMessagesSkippedRegex(n int64) { s.add(&s.MessagesSkippedRegex, n) }
+func (s *Stats) AddMessagesFlagged(n int64)      { s.add(&s.MessagesFlagged, n) }
+func (s *Stats) AddUnidentified(n int64)         { s.add(&s.MessagesUnidentified, n) }
+func (s *Stats) AddDeleted1(n int64)             { s.add(&s.MessagesDeleted1, n) }
+func (s *Stats) AddDeleted2(n int64)             { s.add(&s.MessagesDeleted2, n) }
+func (s *Stats) AddErrors(n int64)               { s.add(&s.Errors, n) }
+func (s *Stats) AddFoldersSynced(n int64)        { s.add(&s.FoldersSynced, n) }
+func (s *Stats) AddFoldersCreated(n int64)       { s.add(&s.FoldersCreated, n) }
+func (s *Stats) AddFoldersDeleted(n int64)       { s.add(&s.FoldersDeleted, n) }
 
 // AddBytes прибавляет перенесённые байты.
 func (s *Stats) AddBytes(n int64) { s.add(&s.BytesCopied, n) }
@@ -72,6 +74,7 @@ func (s *Stats) SetHost2(n int64) { s.add(&s.BytesHost2, n) }
 type Snapshot struct {
 	FoldersSynced, FoldersCreated, FoldersDeleted int64
 	MessagesCopied, MessagesSkipped               int64
+	MessagesSkippedRegex                          int64
 	MessagesDeleted1, MessagesDeleted2            int64
 	MessagesFlagged, MessagesUnidentified         int64
 	BytesCopied, BytesHost1, BytesHost2           int64
@@ -89,6 +92,7 @@ func (s *Stats) Get() Snapshot {
 		FoldersDeleted:       s.FoldersDeleted,
 		MessagesCopied:       s.MessagesCopied,
 		MessagesSkipped:      s.MessagesSkipped,
+		MessagesSkippedRegex: s.MessagesSkippedRegex,
 		MessagesDeleted1:     s.MessagesDeleted1,
 		MessagesDeleted2:     s.MessagesDeleted2,
 		MessagesFlagged:      s.MessagesFlagged,
@@ -106,10 +110,10 @@ func (s *Stats) Summary() string {
 	snap := s.Get()
 	return fmt.Sprintf(
 		"folders: %d synced, %d created, %d deleted | "+
-			"messages: %d copied, %d skipped(dup), %d flagged, %d unidentified, "+
+			"messages: %d copied, %d skipped(dup), %d skipped(regex), %d flagged, %d unidentified, "+
 			"%d deleted1, %d deleted2 | bytes: %d | errors: %d",
 		snap.FoldersSynced, snap.FoldersCreated, snap.FoldersDeleted,
-		snap.MessagesCopied, snap.MessagesSkipped, snap.MessagesFlagged,
+		snap.MessagesCopied, snap.MessagesSkipped, snap.MessagesSkippedRegex, snap.MessagesFlagged,
 		snap.MessagesUnidentified, snap.MessagesDeleted1, snap.MessagesDeleted2,
 		snap.BytesCopied, snap.Errors,
 	)
@@ -127,9 +131,9 @@ func (s *Stats) FinalReport() string {
 		"Synced %d folders (%d created, %d deleted)",
 		snap.FoldersSynced, snap.FoldersCreated, snap.FoldersDeleted))
 	lines = append(lines, fmt.Sprintf(
-		"Copied %d messages (%d bytes), skipped %d duplicates, resynced flags on %d, %d unidentified",
+		"Copied %d messages (%d bytes), skipped %d duplicates, skipped %d by regex, resynced flags on %d, %d unidentified",
 		snap.MessagesCopied, snap.BytesCopied, snap.MessagesSkipped,
-		snap.MessagesFlagged, snap.MessagesUnidentified))
+		snap.MessagesSkippedRegex, snap.MessagesFlagged, snap.MessagesUnidentified))
 	lines = append(lines, fmt.Sprintf(
 		"Deleted %d messages on host1, %d messages on host2",
 		snap.MessagesDeleted1, snap.MessagesDeleted2))

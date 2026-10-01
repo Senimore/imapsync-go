@@ -129,13 +129,13 @@ func run(args []string) int {
 	}
 
 	// Логин.
-	if err := src.Login(opts.User1, opts.Password1, opts.AuthMech1); err != nil {
+	if err := src.Login(opts.User1, opts.Password1, opts.AuthMech1, opts.AuthUser1, opts.ProxyAuth1); err != nil {
 		log.Printf("%v\n", err)
 		return EX_SOFTWARE
 	}
 	log.Printf("Логин host1 успешен: %s\n", opts.User1)
 
-	if err := dst.Login(opts.User2, opts.Password2, opts.AuthMech2); err != nil {
+	if err := dst.Login(opts.User2, opts.Password2, opts.AuthMech2, opts.AuthUser2, opts.ProxyAuth2); err != nil {
 		log.Printf("%v\n", err)
 		return EX_SOFTWARE
 	}
@@ -163,7 +163,7 @@ func run(args []string) int {
 			if err != nil {
 				return nil, nil, fmt.Errorf("host1 pair: %w", err)
 			}
-			if err := s1.Login(opts.User1, opts.Password1, opts.AuthMech1); err != nil {
+			if err := s1.Login(opts.User1, opts.Password1, opts.AuthMech1, opts.AuthUser1, opts.ProxyAuth1); err != nil {
 				s1.Logout()
 				return nil, nil, fmt.Errorf("host1 pair login: %w", err)
 			}
@@ -172,7 +172,7 @@ func run(args []string) int {
 				s1.Logout()
 				return nil, nil, fmt.Errorf("host2 pair: %w", err)
 			}
-			if err := s2.Login(opts.User2, opts.Password2, opts.AuthMech2); err != nil {
+			if err := s2.Login(opts.User2, opts.Password2, opts.AuthMech2, opts.AuthUser2, opts.ProxyAuth2); err != nil {
 				s1.Logout()
 				s2.Logout()
 				return nil, nil, fmt.Errorf("host2 pair login: %w", err)
@@ -201,7 +201,7 @@ func run(args []string) int {
 
 	snap := stats.Get()
 	log.Printf("Exiting with return value %d (EX_OK: successful termination) %d/%d nb_errors/max_errors PID %d\n",
-		exitCode(snap.Errors), snap.Errors, 50, os.Getpid())
+		exitCode(snap.Errors), snap.Errors, opts.ErrorsMax, os.Getpid())
 	if p := log.LogPath(); p != "" {
 		log.Printf("Log file is %s ( to change it, use --logfile filepath ; or use --nolog to turn off logging )\n", p)
 	}
