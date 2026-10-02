@@ -11,15 +11,18 @@ package sync
 import (
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"net/http"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"regexp"
 
 	"github.com/emersion/go-imap"
+	"github.com/emersion/go-imap/client"
 
 	"github.com/Senimore/imapsync-go/pkg/cache"
 	"github.com/Senimore/imapsync-go/pkg/imapx"
@@ -48,6 +51,11 @@ type Sync struct {
 	// гортины. Используется только при --threads > 1. Может быть nil, если
 	// параллельный режим не требуется.
 	NewPair func() (*imapx.Conn, *imapx.Conn, error)
+
+	// Reconnect создаёт новую пару соединений (host1, host2) после обрыва
+	// связи — аналог reconnect_12_if_needed в imapsync. Используется в
+	// последовательном режиме. Может быть nil (тогда обрыв фатален).
+	Reconnect func() (*imapx.Conn, *imapx.Conn, error)
 
 	// Канонические имена заголовков для идентичности.
 	headerKeys []string
@@ -161,7 +169,29 @@ func (s *Sync) Run() error {
 				break
 			}
 			dstName := s.mapFolder(sf.Name, srcDelim, dstDelim, f1f2)
-			if err := s.syncFolder(s.Src, s.Dst, sf.Name, dstName); err != nil {
+			err := s.syncFolder(s.Src, s.Dst, sf.Name, dstName)
+			// Обрыв соединения — переподключаемся и повторяем папку,
+			// как reconnect_12_if_needed в imapsync.
+			for attempt := 0; err != nil && isConnectionLost(err) && s.Reconnect != nil; attempt++ {
+				limit := s.Opts.Reconnect1
+				if limit < s.Opts.Reconnect2 {
+					limit = s.Opts.Reconnect2
+				}
+				if attempt >= limit {
+					break
+				}
+				s.Log.Printf("Соединение потеряно (%v) — переподключение, попытка %d/%d\n", err, attempt+1, limit)
+				s.Src.Logout()
+				s.Dst.Logout()
+				src2, dst2, cerr := s.Reconnect()
+				if cerr != nil {
+					s.Log.Printf("Переподключение не удалось: %v\n", cerr)
+					break
+				}
+				s.Src, s.Dst = src2, dst2
+				err = s.syncFolder(s.Src, s.Dst, sf.Name, dstName)
+			}
+			if err != nil {
 				runErr = firstErr(runErr, err)
 				s.Stats.AddErrors(1)
 				s.Log.Printf("ОШИБКА синхронизации %q -> %q: %v\n", sf.Name, dstName, err)
@@ -223,6 +253,30 @@ func (s *Sync) Run() error {
 	}
 
 	return runErr
+}
+
+// isConnectionLost определяет, что ошибка вызвана обрывом соединения
+// (сервер закрыл сессию, TCP-разрыв, EOF), а не логической ошибкой IMAP.
+// Такие ошибки — повод переподключиться, как это делает imapsync.
+func isConnectionLost(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, syscall.ECONNRESET) ||
+		errors.Is(err, syscall.EPIPE) || errors.Is(err, client.ErrNotLoggedIn) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	for _, s := range []string{
+		"not logged in", "connection closed", "connection reset",
+		"broken pipe", "eof", "i/o timeout", "use of closed",
+		"server closing", "bye",
+	} {
+		if strings.Contains(msg, s) {
+			return true
+		}
+	}
+	return false
 }
 
 func firstErr(a, b error) error {

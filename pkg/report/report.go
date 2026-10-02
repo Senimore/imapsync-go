@@ -124,6 +124,9 @@ func (s *Stats) FinalReport() string {
 	snap := s.Get()
 	good := snap.Errors == 0
 	lines := []string{}
+	// Строка «Messages copied: N» — её извлекает парсер отчёта агента
+	// (taskexecutor.extractMessagesCount), формат фиксирован.
+	lines = append(lines, fmt.Sprintf("Messages copied: %d", snap.MessagesCopied))
 	lines = append(lines, fmt.Sprintf(
 		"Host1 total size: %d bytes; Host2 total size: %d bytes",
 		snap.BytesHost1, snap.BytesHost2))

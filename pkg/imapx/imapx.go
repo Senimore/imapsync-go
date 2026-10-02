@@ -7,7 +7,6 @@ import (
 	"bufio"
 	"bytes"
 	"crypto/tls"
-	"encoding/base64"
 	"fmt"
 	"io"
 	"net"
@@ -19,8 +18,16 @@ import (
 
 	"github.com/emersion/go-imap"
 	"github.com/emersion/go-imap/client"
+	"github.com/emersion/go-imap/commands"
+	"github.com/emersion/go-imap/responses"
+	"github.com/emersion/go-imap/utf7"
 	"github.com/emersion/go-sasl"
 )
+
+// asyncLiteralLimit — порог go-imap: литералы не длиннее передаются
+// несинхронно ({N+}) при объявленном LITERAL+, длиннее — синхронно с
+// ожиданием continuation-запроса (см. AppendMessage).
+const asyncLiteralLimit = 4096
 
 // Conn — активное IMAP-соединение с метаданными.
 type Conn struct {
@@ -39,11 +46,18 @@ type XOAuth2Client struct {
 	Token string
 }
 
+// Start формирует initial response SASL-механизма XOAUTH2 (RFC 7628 / Gmail):
+//
+//	user=<user>\x01auth=Bearer <token>\x01\x01
+//
+// ВАЖНО: ir — СЫРЫЕ байты. Контракт go-sasl/go-imap: base64 применяет
+// go-imap (commands/authenticate.go), а не клиент. Двойное кодирование
+// давало серверу base64-строку вместо SASL-строк и Яндекс отвечал
+// «AUTHENTICATE internal server error» (Яндекс не объявляет SASL-IR,
+// поэтому go-imap отправляет ir ответом на «+» — тот же путь).
 func (c *XOAuth2Client) Start() (mech string, ir []byte, err error) {
 	mech = "XOAUTH2"
-	// user=<user>\x01auth=Bearer <token>\x01\x01
-	auth := "user=" + c.User + "\x01auth=Bearer " + c.Token + "\x01\x01"
-	ir = []byte(base64.StdEncoding.EncodeToString([]byte(auth)))
+	ir = []byte("user=" + c.User + "\x01auth=Bearer " + c.Token + "\x01\x01")
 	return
 }
 
@@ -110,14 +124,70 @@ func Connect(host string, port int, ssl, tlsStart, insecure bool, timeout time.D
 	return conn, nil
 }
 
+// xoauth2Response — handler обмена XOAUTH2 при immediate response.
+//
+// После `AUTHENTICATE XOAUTH2 <ir>` сервер либо отвечает tagged-статусом
+// (OK/NO), либо (Gmail при отказе) шлёт challenge с JSON-описанием —
+// по спецификации Gmail клиент обязан ответить пустой строкой, после
+// чего приходит NO.
+type xoauth2Response struct {
+	replies chan []byte
+}
+
+func (r *xoauth2Response) Replies() <-chan []byte { return r.replies }
+
+func (r *xoauth2Response) Handle(resp imap.Resp) error {
+	if _, ok := resp.(*imap.ContinuationReq); !ok {
+		return responses.ErrUnhandled
+	}
+	// Пустой ответ на challenge (Gmail XOAUTH2).
+	r.replies <- []byte("\r\n")
+	return nil
+}
+
+// xoauth2Immediate выполняет AUTHENTICATE XOAUTH2 с immediate response —
+// initial response передаётся АРГУМЕНТОМ команды (RFC 4959 §3):
+//
+//	<tag> AUTHENTICATE XOAUTH2 base64(user=...\x01auth=Bearer <tok>\x01\x01)
+//
+// go-imap умеет immediate response только когда сервер объявил SASL-IR.
+// Серверы без SASL-IR (Яндекс) на двухшаговый обмен
+// «AUTHENTICATE XOAUTH2» → «+» → ответ отвечают
+// «NO [UNAVAILABLE] AUTHENTICATE internal server error», поэтому обмен
+// ведётся вручную через client.Execute.
+func (c *Conn) xoauth2Immediate(user, token string) error {
+	ir := []byte("user=" + user + "\x01auth=Bearer " + token + "\x01\x01")
+	cmd := &commands.Authenticate{Mechanism: "XOAUTH2", InitialResponse: ir}
+	res := &xoauth2Response{replies: make(chan []byte, 4)}
+
+	status, err := c.Client.Execute(cmd, res)
+	if err != nil {
+		return err
+	}
+	if err := status.Err(); err != nil {
+		return err
+	}
+	c.Client.SetState(imap.AuthenticatedState, c.Client.Mailbox())
+	return nil
+}
+
 // Login выполняет аутентификацию выбранным механизмом.
 //
 // authUser/proxyAuth соответствуют --authuserN/--proxyauthN в imapsync:
 //
 //	--proxyauthN: логинимся под authUser (LOGIN), затем отправляем
 //	PROXYAUTH <user> (Cyrus-style proxy authentication);
-//	PLAIN с authUser: SASL PLAIN с authorization id = authUser
-//	(identity\x00user\x00password), как делает imapsync (plainauth).
+//	PLAIN с authUser: SASL PLAIN с authorization id = user (переносимый
+//	ящик) и authentication id = authUser (admin), т.е. на проводе
+//	"user\x00authUser\x00password" — ровно как imapsync (plainauth):
+//
+//	mysprintf("%s\x00%s\x00%s", $imap->User,
+//	          defined $imap->Authuser ? $imap->Authuser : "",
+//	          $imap->Password)
+//
+// Это важно для Dovecot master users / Zimbra admin proxy: сервер
+// проверяет, что authentication id (admin) имеет право на authorization
+// id (ящик), а не наоборот.
 func (c *Conn) Login(user, password, mech, authUser string, proxyAuth bool) error {
 	c.User = user
 
@@ -137,8 +207,17 @@ func (c *Conn) Login(user, password, mech, authUser string, proxyAuth bool) erro
 
 	switch strings.ToUpper(mech) {
 	case "XOAUTH2":
-		xo := &XOAuth2Client{User: user, Token: password}
-		if err := c.Client.Authenticate(xo); err != nil {
+		// SASL-IR объявлен → штатный обмен go-imap (initial response
+		// отправляется ответом на «+», сервер это понимает).
+		if saslIR, _ := c.Client.Support("SASL-IR"); saslIR {
+			xo := &XOAuth2Client{User: user, Token: password}
+			if err := c.Client.Authenticate(xo); err != nil {
+				return fmt.Errorf("XOAUTH2-логин %s@%s: %w", user, c.Host, err)
+			}
+			return nil
+		}
+		// Без SASL-IR (Яндекс): immediate response аргументом команды.
+		if err := c.xoauth2Immediate(user, password); err != nil {
 			return fmt.Errorf("XOAUTH2-логин %s@%s: %w", user, c.Host, err)
 		}
 		return nil
@@ -154,8 +233,11 @@ func (c *Conn) Login(user, password, mech, authUser string, proxyAuth bool) erro
 		}
 		return nil
 	case "PLAIN":
-		// SASL PLAIN: identity = authUser (admin), username = user.
-		pc := sasl.NewPlainClient(authUser, user, password)
+		// SASL PLAIN в стиле imapsync (plainauth):
+		// authzid = user (переносимый ящик), authcid = authUser (admin).
+		// На проводе: base64("user\x00authUser\x00password").
+		// Без authUser получается обычный PLAIN ("user\x00\x00password").
+		pc := sasl.NewPlainClient(user, authUser, password)
 		if err := c.Client.Authenticate(pc); err != nil {
 			return fmt.Errorf("PLAIN-логин %s@%s (authuser %q): %w", user, c.Host, authUser, err)
 		}
@@ -467,9 +549,62 @@ func (c *Conn) FetchRfc822(uid uint32) ([]byte, *imap.Message, error) {
 }
 
 // AppendMessage добавляет сообщение в папку с флагами и датой.
+//
+// Литералы длиннее asyncLiteralLimit go-imap отправляет синхронно —
+// с ожиданием continuation-запроса «+». Ряд серверов (example.com)
+// continuation не присылает, и запись прерывается ошибкой
+// «cannot send literal: no continuation request received». Поэтому
+// для больших писем используется APPEND с несинхронным литералом
+// ({N+}, RFC 3501 §2.5.10), если сервер объявил LITERAL+.
 func (c *Conn) AppendMessage(folder string, flags []string, date time.Time, data []byte) error {
 	lit := bytesLiteral{Reader: bytes.NewReader(data)}
+	if len(data) > asyncLiteralLimit {
+		if ok, _ := c.Client.Support("LITERAL+"); ok {
+			if err := c.appendAsyncLiteral(folder, flags, date, data); err == nil {
+				return nil
+			} else if !isNoContinuationErr(err) {
+				return err
+			}
+		}
+	}
 	return c.Client.Append(folder, flags, date, lit)
+}
+
+// appendAsyncLiteral выполняет APPEND с несинхронным литералом ({N+},
+// RFC 3501 §2.5.10). Тело письма передаётся как RawString — go-imap
+// пишет его в поток как есть, без ожидания continuation-запроса «+»,
+// который серверы вроде example.com не присылают.
+func (c *Conn) appendAsyncLiteral(folder string, flags []string, date time.Time, data []byte) error {
+	name, err := utf7.Encoding.NewEncoder().String(folder)
+	if err != nil {
+		name = folder
+	}
+
+	args := []interface{}{imap.FormatMailboxName(name)}
+	if len(flags) > 0 {
+		list := make([]interface{}, len(flags))
+		for i, f := range flags {
+			list[i] = imap.RawString(f)
+		}
+		args = append(args, list)
+	}
+	if !date.IsZero() {
+		args = append(args, imap.DateTime(date))
+	}
+	// Заголовок литерала + тело одним полем: writeFields запишет его
+	// как есть, writeCrlf добавит завершающий CRLF команды.
+	args = append(args, imap.RawString(fmt.Sprintf("{%d+}\r\n", len(data))+string(data)))
+
+	status, err := c.Client.Execute(&imap.Command{Name: "APPEND", Arguments: args}, nil)
+	if err != nil {
+		return err
+	}
+	return status.Err()
+}
+
+// isNoContinuationErr — ошибка go-imap об отсутствии continuation-запроса.
+func isNoContinuationErr(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "no continuation request received")
 }
 
 // toInterfaces преобразует срез строк флагов в []interface{} для go-imap client.UidStore.

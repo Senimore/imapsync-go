@@ -20,6 +20,7 @@ import (
 	"os"
 	"os/signal"
 	"sort"
+	gosync "sync"
 	"syscall"
 	"time"
 
@@ -30,10 +31,11 @@ import (
 	"github.com/Senimore/imapsync-go/pkg/sync"
 )
 
-// Коды выхода в стиле imapsync.
+// Коды выхода в стиле imapsync (см. imapsync.pl: EX_OK/EX_SOFTWARE/EX_FAIL).
 const (
-	ExOK        = 0   // успешное завершение
-	ExSoftware  = 100 // программная ошибка (соединение, логин, ошибки синка)
+	ExOK        = 0   // успешное завершение (nb_errors < max_errors)
+	ExSoftware  = 100 // программная ошибка (соединение, логин)
+	ExFail      = 101 // превышен лимит ошибок (--errorsmax)
 	ExCantCreat = 73  // нельзя создать файл журнала
 	ExUsage     = 64  // ошибка разбора/валидации опций
 )
@@ -124,39 +126,72 @@ func RunSync(opts *options.Options, stdout io.Writer) int {
 		debugW2 = stdout
 	}
 
-	src, err := imapx.Connect(opts.Host1, opts.Port1, opts.SSL1, opts.TLS1, opts.Insecure, timeout, debugW1)
-	if err != nil {
-		log.Printf("Не удалось подключиться к host1: %v\n", err)
-		return ExSoftware
+	// connectPair создаёт и логинит пару соединений (host1, host2).
+	// Используется для основного соединения, для --threads>1 и для
+	// переподключения при обрыве связи.
+	connectPair := func() (*imapx.Conn, *imapx.Conn, error) {
+		s1, err := imapx.Connect(opts.Host1, opts.Port1, opts.SSL1, opts.TLS1, opts.SSLInsecure1(), timeout, debugW1)
+		if err != nil {
+			return nil, nil, fmt.Errorf("host1: %w", err)
+		}
+		if err := s1.Login(opts.User1, opts.Password1, opts.AuthMech1, opts.AuthUser1, opts.ProxyAuth1); err != nil {
+			s1.Logout()
+			return nil, nil, fmt.Errorf("host1 login: %w", err)
+		}
+		s2, err := imapx.Connect(opts.Host2, opts.Port2, opts.SSL2, opts.TLS2, opts.SSLInsecure2(), timeout, debugW2)
+		if err != nil {
+			s1.Logout()
+			return nil, nil, fmt.Errorf("host2: %w", err)
+		}
+		if err := s2.Login(opts.User2, opts.Password2, opts.AuthMech2, opts.AuthUser2, opts.ProxyAuth2); err != nil {
+			s1.Logout()
+			s2.Logout()
+			return nil, nil, fmt.Errorf("host2 login: %w", err)
+		}
+		return s1, s2, nil
 	}
-	defer src.Logout()
 
-	dst, err := imapx.Connect(opts.Host2, opts.Port2, opts.SSL2, opts.TLS2, opts.Insecure, timeout, debugW2)
-	if err != nil {
-		log.Printf("Не удалось подключиться к host2: %v\n", err)
-		return ExSoftware
-	}
-	defer dst.Logout()
-
-	log.Printf("Capabilities host1: %s\n", CapsString(src.Caps))
-	log.Printf("Capabilities host2: %s\n", CapsString(dst.Caps))
-
+	// --justconnect: соединения без логина.
 	if opts.JustConnect {
+		src, err := imapx.Connect(opts.Host1, opts.Port1, opts.SSL1, opts.TLS1, opts.SSLInsecure1(), timeout, debugW1)
+		if err != nil {
+			log.Printf("Не удалось подключиться к host1: %v\n", err)
+			return ExSoftware
+		}
+		defer src.Logout()
+		dst, err := imapx.Connect(opts.Host2, opts.Port2, opts.SSL2, opts.TLS2, opts.SSLInsecure2(), timeout, debugW2)
+		if err != nil {
+			log.Printf("Не удалось подключиться к host2: %v\n", err)
+			return ExSoftware
+		}
+		defer dst.Logout()
+		log.Printf("Capabilities host1: %s\n", CapsString(src.Caps))
+		log.Printf("Capabilities host2: %s\n", CapsString(dst.Caps))
 		log.Printf("--justconnect: соединение установлено, выход\n")
 		return ExOK
 	}
 
-	// Логин.
-	if err := src.Login(opts.User1, opts.Password1, opts.AuthMech1, opts.AuthUser1, opts.ProxyAuth1); err != nil {
-		log.Printf("%v\n", err)
+	src, dst, err := connectPair()
+	if err != nil {
+		log.Printf("Не удалось подключиться: %v\n", err)
 		return ExSoftware
 	}
-	log.Printf("Логин host1 успешен: %s\n", opts.User1)
+	// s объявлен здесь, чтобы defer закрыл актуальные соединения: после
+	// реконнекта в синке s.Src/s.Dst указывают на новые пары.
+	var s *sync.Sync
+	defer func() {
+		if s != nil {
+			s.Src.Logout()
+			s.Dst.Logout()
+			return
+		}
+		src.Logout()
+		dst.Logout()
+	}()
 
-	if err := dst.Login(opts.User2, opts.Password2, opts.AuthMech2, opts.AuthUser2, opts.ProxyAuth2); err != nil {
-		log.Printf("%v\n", err)
-		return ExSoftware
-	}
+	log.Printf("Capabilities host1: %s\n", CapsString(src.Caps))
+	log.Printf("Capabilities host2: %s\n", CapsString(dst.Caps))
+	log.Printf("Логин host1 успешен: %s\n", opts.User1)
 	log.Printf("Логин host2 успешен: %s\n", opts.User2)
 
 	if opts.JustLogin {
@@ -171,32 +206,15 @@ func RunSync(opts *options.Options, stdout io.Writer) int {
 
 	// Полная синхронизация.
 	stats := report.New()
-	s := sync.New(src, dst, opts, log, stats)
+	s = sync.New(src, dst, opts, log, stats)
+
+	// Переподключение при обрыве связи (аналог reconnect_12_if_needed).
+	s.Reconnect = connectPair
 
 	// Для параллельного режима (--threads>1) каждой горутине нужна своя пара
 	// соединений, т.к. у одного IMAP-соединения открыта одна папка (SELECT).
 	if opts.Threads > 1 {
-		s.NewPair = func() (*imapx.Conn, *imapx.Conn, error) {
-			s1, err := imapx.Connect(opts.Host1, opts.Port1, opts.SSL1, opts.TLS1, opts.Insecure, timeout, nil)
-			if err != nil {
-				return nil, nil, fmt.Errorf("host1 pair: %w", err)
-			}
-			if err := s1.Login(opts.User1, opts.Password1, opts.AuthMech1, opts.AuthUser1, opts.ProxyAuth1); err != nil {
-				s1.Logout()
-				return nil, nil, fmt.Errorf("host1 pair login: %w", err)
-			}
-			s2, err := imapx.Connect(opts.Host2, opts.Port2, opts.SSL2, opts.TLS2, opts.Insecure, timeout, nil)
-			if err != nil {
-				s1.Logout()
-				return nil, nil, fmt.Errorf("host2 pair: %w", err)
-			}
-			if err := s2.Login(opts.User2, opts.Password2, opts.AuthMech2, opts.AuthUser2, opts.ProxyAuth2); err != nil {
-				s1.Logout()
-				s2.Logout()
-				return nil, nil, fmt.Errorf("host2 pair login: %w", err)
-			}
-			return s1, s2, nil
-		}
+		s.NewPair = connectPair
 	}
 
 	// Обработка сигналов: Ctrl-C — прервать синхронизацию.
@@ -222,19 +240,36 @@ func RunSync(opts *options.Options, stdout io.Writer) int {
 	}
 
 	snap := stats.Get()
-	log.Printf("Exiting with return value %d (EX_OK: successful termination) %d/%d nb_errors/max_errors PID %d\n",
-		ExitCode(snap.Errors), snap.Errors, opts.ErrorsMax, os.Getpid())
+
+	// Семантика кодов как у Perl imapsync: единичные ошибки писем
+	// (nb_errors < max_errors) — успешное завершение (ExOK); превышение
+	// лимита --errorsmax — ExFail; сбой соединения/логина — ExSoftware.
+	code := ExOK
+	if runErr != nil {
+		code = ExSoftware
+	} else if snap.Errors >= int64(opts.ErrorsMax) {
+		code = ExFail
+	}
+
+	log.Printf("Exiting with return value %d (%s) %d/%d nb_errors/max_errors PID %d\n",
+		code, exitCodeName(code), snap.Errors, opts.ErrorsMax, os.Getpid())
 	if p := log.LogPath(); p != "" {
 		log.Printf("Log file is %s ( to change it, use --logfile filepath ; or use --nolog to turn off logging )\n", p)
 	}
 
-	if runErr != nil {
-		return ExSoftware
+	return code
+}
+
+// exitCodeName — человекочитаемое имя кода выхода в стиле imapsync.
+func exitCodeName(code int) string {
+	switch code {
+	case ExOK:
+		return "EX_OK: successful termination"
+	case ExFail:
+		return "EX_FAIL: software error, please report"
+	default:
+		return "EX_SOFTWARE: software error, please report"
 	}
-	if snap.Errors > 0 {
-		return ExSoftware
-	}
-	return ExOK
 }
 
 // JustFolders печатает список (и размеры) папок источника.
@@ -286,15 +321,40 @@ func CapsString(caps map[string]bool) string {
 	return out
 }
 
-// ExitCode возвращает код выхода по числу ошибок.
-func ExitCode(errors int64) int {
-	if errors == 0 {
-		return ExOK
+// ExitCode возвращает код выхода по числу ошибок в стиле Perl imapsync:
+// errors == 0 — ExOK; 0 < errors < errorsMax — ExOK (imapsync считает
+// запуск успешным, пока nb_errors < max_errors); errors >= errorsMax —
+// ExFail.
+func ExitCode(errors int64, errorsMax int) int {
+	if errors >= int64(errorsMax) {
+		return ExFail
 	}
-	return ExSoftware
+	return ExOK
 }
 
-// stderrOf возвращает os.Stderr (stdout используется только для прогресса).
-func stderrOf(_ io.Writer) io.Writer {
-	return os.Stderr
+// guardMu сериализует вызовы RunSyncInProcess (подмена stderrOf +
+// перехват сигналов должны быть атомарными).
+var guardMu gosync.Mutex
+
+// stderrOf возвращает поток ошибок. По умолчанию это os.Stderr; в
+// встроенном режиме (RunSyncInProcess) — поток, переданный вызывающим
+// кодом, чтобы весь вывод (прогресс + ошибки) собирался в один буфер.
+var stderrOf func(io.Writer) io.Writer = func(io.Writer) io.Writer { return os.Stderr }
+
+// RunSyncInProcess выполняет синхронизацию «в процессе» (без запуска
+// внешнего бинарника): весь вывод — прогресс и сообщения об ошибках —
+// пишется в stdout, ошибки — в stderr. Возвращает код выхода в стиле
+// imapsync.
+//
+// Вызовы сериализуются: реализация перехватывает SIGINT/SIGTERM и
+// подменяет поток ошибок на время работы, поэтому параллельные вызовы
+// из нескольких горутин не поддерживаются (агент и так ограничивает
+// параллелизм одного движка).
+func RunSyncInProcess(args []string, stdout, stderr io.Writer) int {
+	guardMu.Lock()
+	defer guardMu.Unlock()
+	prev := stderrOf
+	stderrOf = func(io.Writer) io.Writer { return stderr }
+	defer func() { stderrOf = prev }()
+	return Run(args, stdout)
 }

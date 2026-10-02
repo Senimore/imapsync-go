@@ -154,9 +154,164 @@ type Options struct {
 	ExitWhenOver int64
 	AddHeader    bool // добавить заголовок X-IMAPSYNC при переносе
 
+	// Параметры TLS-рукопожатия OpenSSL (--sslargsN), как в imapsync.
+	// Значения вида "SSL_verify_mode=0"; --nosslargs отключает их все.
+	SslArgs1, SslArgs2 []string
+	NoSslArgs          bool
+
+	// Явное отключение TLS (--nosslN/--notlsN), как в imapsync.
+	NoSSL1, NoSSL2 bool
+	NoTLS1, NoTLS2 bool
+
+	// OAuth (--oauthaccesstokenN, --oauthdirectN): токен подставляется
+	// в PasswordN, а AuthMechN становится XOAUTH2.
+	OAuthAccessToken1, OAuthAccessToken2 string
+	OAuthDirect1, OAuthDirect2           string
+
+	// Пресеты провайдеров (--dominoN, --exchangeN, --officeN).
+	Exchange1, Exchange2 bool
+	Office1, Office2     bool
+	Domino1, Domino2     bool
+
+	// Фильтры/преобразования содержимого сообщения.
+	DisarmReadReceipts bool     // --disarmreadreceipts
+	RegexMess          []string // --regexmess: Perl-подобные замены в сообщении
+
+	// Лимиты буфера/строки.
+	BufferSize    int // --buffersize
+	MaxLineLength int // --maxlinelength
+
+	// Даты/флаги сообщений.
+	IDateFromHeader  bool // --idatefromheader
+	FilterBuggyFlags bool // --filterbuggyflags
+
+	// Дедупликация/качество.
+	SyncDuplicates       bool // --syncduplicates
+	AllowSizeMismatch    bool // --allowsizemismatch
+	SkipSize             bool // --skipsize
+	DebugCrossDuplicates bool // --debugcrossduplicates
+
+	// Подписки и ACL/метки.
+	Subscribed   bool // --subscribed: только подписанные папки
+	SubscribeAll bool // --subscribeall
+	Subscribe    bool // --subscribe: подписывать на host2 перенесённые подписанные папки (по умолчанию)
+	NoSyncAcls   bool // --nosyncacls
+	SyncLabels   bool // --synclabels
+	ResyncLabels bool // --resynclabels
+	Labels1      bool // --labels1
+	Labels2      bool // --labels2
+
+	// Устойчивость соединения.
+	Keepalive1, Keepalive2     bool
+	NoKeepalive1, NoKeepalive2 bool
+	NoAbilityToSearch          bool // --noabletosearch
+	NoAbilityToSearch1         bool
+	NoAbilityToSearch2         bool
+
+	// Отладка (флаги из whitelist проекта; часть — no-op).
+	DebugFolders           bool
+	DebugContent           bool
+	DebugFlags             bool
+	DebugSSL1, DebugSSL2   bool
+	DebugIMAP1, DebugIMAP2 bool
+	NoErrorsDump           bool
+	NoModulesVersion       bool
+	ModulesVersion         bool
+
+	// Служебные файлы/отчёты.
+	PidFile     string // --pidfile
+	TmpDir      string // --tmpdir
+	EmailReport string // --emailreport
+	ExitStatus0 bool   // --exitstatus0
+	Tests       bool   // --tests
+	Info        bool   // --info
+
+	// Таймауты по хостам (--timeout1/--timeout2).
+	Timeout1, Timeout2 int
+
+	// Попытки переподключения при обрыве соединения (--reconnectretry1/2),
+	// как $DEFAULT_NB_RECONNECT_PER_IMAP_COMMAND в imapsync.
+	Reconnect1, Reconnect2 int
+
+	// Пресеты Gmail (--gmail1/--gmail2).
+	Gmail1, Gmail2 bool
+
+	// Прочие опции проекта, принимаемые для совместимости.
+	Passfile1, Passfile2  string // --passfileN: файл с паролем (первая строка)
+	Domain1, Domain2      string // --domainN: домен для NTLM
+	Authmd51, Authmd52    bool   // --authmd5N
+	ShowPasswords         bool   // --showpasswords
+	NomixFolders          bool   // --nomixfolders
+	Noid                  bool   // --noid: не отправлять IMAP ID
+	SyncAcls              bool   // --syncacls
+	NoExpunge1            bool   // --noexpunge1
+	NoExpunge2            bool   // --noexpunge2
+	NoFoldersizes         bool   // --nofoldersizes
+	NoFoldersizesAtEnd    bool   // --nofoldersizesatend
+	PidFileLocking        bool   // --pidfilelocking
+	Abort                 bool   // --abort
+	EmailReport1          bool   // --emailreport1
+	EmailReport2          bool   // --emailreport2
+	NoEmailReport1        bool   // --noemailreport1
+	NoEmailReport2        bool   // --noemailreport2
+	PipeMess              []string
+	Delete2FoldersOnly    string // --delete2foldersonly RE
+	Delete2FoldersButNot  string // --delete2foldersbutnot RE
+	NoSkipCrossDuplicates bool   // --noskipcrossduplicates
+	NoSubscribe           bool   // --nosubscribe
+	NoSyncLabels          bool   // --nosynclabels
+	NoResyncLabels        bool   // --noresynclabels
+
+	// Perl-отрицания, отключающие добавления пресетов провайдеров.
+	NoRegexFlag  bool // --noregexflag
+	NoRegexMess  bool // --noregexmess
+	NoF1F2       bool // --nof1f2
+	NoExcludeOpt bool // --noexclude
+
+	// Отслеживание явных установок для пресетов провайдеров
+	// (семантика Perl: ||= и defined).
+	ssl1Set, ssl2Set               bool
+	skipcrossduplicatesSet         bool
+	synclabelsSet, resynclabelsSet bool
+	idatefromheaderSet             bool
+	maxSleepSet                    bool
+	automapSet                     bool
+	addHeaderSet                   bool
+	expunge1Set                    bool
+	usecacheSet                    bool
+
 	// Служебное.
 	ShowVersion bool
 	ShowHelp    bool
+}
+
+// sslArgsVerifyModeZero — в списке --sslargsN есть SSL_verify_mode=0.
+// В Perl imapsync этот аргумент отключает проверку сертификата сервера;
+// Go-движок трактует его как InsecureSkipVerify для данного host.
+func sslArgsVerifyModeZero(args []string) bool {
+	for _, a := range args {
+		kv := strings.SplitN(a, "=", 2)
+		if len(kv) != 2 {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(kv[0]), "SSL_verify_mode") &&
+			strings.TrimSpace(kv[1]) == "0" {
+			return true
+		}
+	}
+	return false
+}
+
+// SSLInsecure1/SSLInsecure2 — проверять ли сертификат host1/host2:
+// true, если задано --ssl-insecure или для данного host в --sslargsN
+// указан SSL_verify_mode=0 (совместимость с Perl imapsync, где агенты
+// работают через туннель 127.0.0.1 с самоподписанными сертификатами).
+func (o *Options) SSLInsecure1() bool {
+	return o.Insecure || sslArgsVerifyModeZero(o.SslArgs1)
+}
+
+func (o *Options) SSLInsecure2() bool {
+	return o.Insecure || sslArgsVerifyModeZero(o.SslArgs2)
 }
 
 // New возвращает Options со значениями по умолчанию, как в imapsync.
@@ -167,6 +322,8 @@ func New() *Options {
 		AuthMech2:         "LOGIN",
 		TimeoutSec:        0,
 		Threads:           1,
+		Reconnect1:        3, // $DEFAULT_NB_RECONNECT_PER_IMAP_COMMAND
+		Reconnect2:        3,
 		SkipEmptyFolders:  true,
 		ErrorsMax:         50,  // $ERRORS_MAX в imapsync
 		MaxSleep:          2.0, // $MAX_SLEEP в imapsync = 2 сек
@@ -203,6 +360,50 @@ func (p *parser) value(key string) (string, error) {
 	return v, nil
 }
 
+// optionalValue молча потребляет следующий аргумент, если он не является
+// опцией. Нужно для булевых опций, которые проект генерирует как строковые
+// (например "--proxyauth1 true" или "--debugssl 4").
+func (p *parser) optionalValue() {
+	if p.hasPending {
+		p.hasPending = false
+		p.pendingValue = ""
+		return
+	}
+	if p.i < len(p.args) && !strings.HasPrefix(p.args[p.i], "-") {
+		p.i++
+	}
+}
+
+// hasValue сообщает, есть ли у текущей опции значение (явное или следующий
+// аргумент, не являющийся опцией).
+func (p *parser) hasValue() bool {
+	if p.hasPending {
+		return true
+	}
+	return p.i < len(p.args) && !strings.HasPrefix(p.args[p.i], "-")
+}
+
+// splitHostPort разбирает значение --hostN в стиле imapsync, где допускаются
+// формы "host", "host:port" и "host:port/folderrec".
+func splitHostPort(v string) (host string, port int, folderRec string, err error) {
+	i := strings.Index(v, ":")
+	if i < 0 {
+		return v, 0, "", nil
+	}
+	host = v[:i]
+	rest := v[i+1:]
+	folderRec = ""
+	if j := strings.Index(rest, "/"); j >= 0 {
+		folderRec = rest[j+1:]
+		rest = rest[:j]
+	}
+	n, e := strconv.Atoi(rest)
+	if e != nil {
+		return "", 0, "", fmt.Errorf("некорректный порт в значении --host %q", v)
+	}
+	return host, n, folderRec, nil
+}
+
 // Parse разбирает аргументы (без имени программы).
 func Parse(args []string) (*Options, error) {
 	o := New()
@@ -236,13 +437,33 @@ func Parse(args []string) (*Options, error) {
 			if e != nil {
 				return nil, e
 			}
-			o.Host1 = v
+			host, port, frec, e2 := splitHostPort(v)
+			if e2 != nil {
+				return nil, e2
+			}
+			o.Host1 = host
+			if port != 0 {
+				o.Port1 = port
+			}
+			if frec != "" {
+				o.FolderRec = append(o.FolderRec, frec)
+			}
 		case "host2":
 			v, e := get()
 			if e != nil {
 				return nil, e
 			}
-			o.Host2 = v
+			host, port, frec, e2 := splitHostPort(v)
+			if e2 != nil {
+				return nil, e2
+			}
+			o.Host2 = host
+			if port != 0 {
+				o.Port2 = port
+			}
+			if frec != "" {
+				o.FolderRec = append(o.FolderRec, frec)
+			}
 		case "user1":
 			v, e := get()
 			if e != nil {
@@ -315,8 +536,10 @@ func Parse(args []string) (*Options, error) {
 			o.AuthUser2 = v
 		case "proxyauth1":
 			o.ProxyAuth1 = true
+			p.optionalValue() // проект генерирует "--proxyauth1 <значение>"
 		case "proxyauth2":
 			o.ProxyAuth2 = true
+			p.optionalValue()
 
 		case "sep1":
 			v, e := get()
@@ -345,15 +568,84 @@ func Parse(args []string) (*Options, error) {
 
 		case "ssl1":
 			o.SSL1 = true
+			o.ssl1Set = true
 		case "ssl2":
 			o.SSL2 = true
+			o.ssl2Set = true
+		case "nossl1":
+			o.SSL1 = false
+			o.ssl1Set = true
+		case "nossl2":
+			o.SSL2 = false
+			o.ssl2Set = true
 		case "tls1":
 			o.TLS1 = true
 		case "tls2":
 			o.TLS2 = true
+		case "notls1":
+			o.TLS1 = false
+		case "notls2":
+			o.TLS2 = false
 		case "ssl-insecure", "no-ssl-check":
 			o.Insecure = true
-		case "timeout1", "timeout2", "timeout":
+		case "sslargs1":
+			v, e := get()
+			if e != nil {
+				return nil, e
+			}
+			o.SslArgs1 = append(o.SslArgs1, v)
+		case "sslargs2":
+			v, e := get()
+			if e != nil {
+				return nil, e
+			}
+			o.SslArgs2 = append(o.SslArgs2, v)
+		case "nosslargs":
+			o.NoSslArgs = true
+			o.SslArgs1, o.SslArgs2 = nil, nil
+		case "timeout1":
+			v, e := get()
+			if e != nil {
+				return nil, e
+			}
+			n, e2 := strconv.Atoi(v)
+			if e2 != nil {
+				return nil, e2
+			}
+			o.Timeout1 = n
+			o.TimeoutSec = n
+		case "timeout2":
+			v, e := get()
+			if e != nil {
+				return nil, e
+			}
+			n, e2 := strconv.Atoi(v)
+			if e2 != nil {
+				return nil, e2
+			}
+			o.Timeout2 = n
+			o.TimeoutSec = n
+		case "reconnectretry1":
+			v, e := get()
+			if e != nil {
+				return nil, e
+			}
+			n, e2 := strconv.Atoi(v)
+			if e2 != nil {
+				return nil, e2
+			}
+			o.Reconnect1 = n
+		case "reconnectretry2":
+			v, e := get()
+			if e != nil {
+				return nil, e
+			}
+			n, e2 := strconv.Atoi(v)
+			if e2 != nil {
+				return nil, e2
+			}
+			o.Reconnect2 = n
+		case "timeout":
 			v, e := get()
 			if e != nil {
 				return nil, e
@@ -368,7 +660,7 @@ func Parse(args []string) (*Options, error) {
 		case "compress2":
 			o.Compress2 = true
 
-		case "useheader":
+		case "useheader", "userheader":
 			v, e := get()
 			if e != nil {
 				return nil, e
@@ -385,14 +677,16 @@ func Parse(args []string) (*Options, error) {
 			}
 			o.SkipHeader = v
 			o.SkipHeaderRe = re
-		case "useuid":
+		case "useuid", "useid":
 			o.UseUID = true
 		case "nouseuid":
 			o.UseUID = false
-		case "usecache":
+		case "usecache", "usechache":
 			o.UseCache = true
-		case "nousecache":
+			o.usecacheSet = true
+		case "nousecache", "nousechache":
 			o.UseCache = false
+			o.usecacheSet = true
 		case "cachedir":
 			v, e := get()
 			if e != nil {
@@ -428,13 +722,21 @@ func Parse(args []string) (*Options, error) {
 			if e != nil {
 				return nil, e
 			}
+			// imapsync и проект используют форму "src=dst" одним токеном.
+			if i := strings.Index(v1, "="); i >= 0 {
+				o.F1F2 = append(o.F1F2, [2]string{v1[:i], v1[i+1:]})
+				break
+			}
 			v2, e := get()
 			if e != nil {
 				return nil, e
 			}
 			o.F1F2 = append(o.F1F2, [2]string{v1, v2})
+		case "nof1f2":
+			o.NoF1F2 = true
 		case "automap":
 			o.Automap = true
+			o.automapSet = true
 		case "exclude1":
 			v, e := get()
 			if e != nil {
@@ -460,12 +762,14 @@ func Parse(args []string) (*Options, error) {
 			}
 			o.Prefix2 = v
 
-		case "regextrans2":
+		case "regextrans2", "regtrans2":
 			v, e := get()
 			if e != nil {
 				return nil, e
 			}
 			o.RegexTrans2 = append(o.RegexTrans2, v)
+		case "noinclude":
+			// no-op: совместимость с синтаксисом imapsync
 		case "include":
 			v, e := get()
 			if e != nil {
@@ -477,6 +781,8 @@ func Parse(args []string) (*Options, error) {
 			}
 			o.Include = append(o.Include, v)
 			o.IncludeRe = append(o.IncludeRe, re)
+		case "noexclude":
+			o.NoExcludeOpt = true
 		case "exclude":
 			v, e := get()
 			if e != nil {
@@ -500,16 +806,39 @@ func Parse(args []string) (*Options, error) {
 				return nil, e
 			}
 			o.FolderLast = append(o.FolderLast, v)
+		case "nofolderlast":
+			o.FolderLast = nil
 
 		case "delete1":
 			o.Delete1 = true
 		case "expunge1":
 			o.Expunge1 = true
+			o.expunge1Set = true
+		case "noexpunge1":
+			o.Expunge1 = false
+			o.expunge1Set = true
+		case "noexpunge2":
+			o.NoExpunge2 = true
+			o.Expunge2 = false
 		case "delete2":
 			o.Delete2 = true
 		case "expunge2":
 			o.Expunge2 = true
 		case "delete2folders":
+			o.Delete2Folders = true
+		case "delete2foldersonly":
+			v, e := get()
+			if e != nil {
+				return nil, e
+			}
+			o.Delete2FoldersOnly = v
+			o.Delete2Folders = true
+		case "delete2foldersbutnot":
+			v, e := get()
+			if e != nil {
+				return nil, e
+			}
+			o.Delete2FoldersButNot = v
 			o.Delete2Folders = true
 		case "delete1emptyfolders":
 			o.Delete1EmptyFolders = true
@@ -526,11 +855,19 @@ func Parse(args []string) (*Options, error) {
 
 		case "skipcrossduplicates":
 			o.SkipCrossDuplicates = true
+			o.skipcrossduplicatesSet = true
+		case "noskipcrossduplicates":
+			o.SkipCrossDuplicates = false
+			o.skipcrossduplicatesSet = true
 		case "delete2duplicates":
 			o.Delete2Duplicates = true
 
 		case "noresyncflags":
 			o.NoResyncFlags = true
+		case "resyncflags":
+			o.NoResyncFlags = false
+		case "filterbuggyflags":
+			o.FilterBuggyFlags = true
 		case "syncflagsaftercopy":
 			o.SyncFlagsAfterCopy = true
 		case "filterflags":
@@ -543,11 +880,19 @@ func Parse(args []string) (*Options, error) {
 				return nil, e
 			}
 			o.RegexFlag = append(o.RegexFlag, v)
+		case "noregexflag":
+			o.NoRegexFlag = true
 
 		case "syncinternaldates":
 			o.SyncInternalDates = true
 		case "nosyncinternaldates":
 			o.SyncInternalDates = false
+		case "idatefromheader", "adtefromheader":
+			o.IDateFromHeader = true
+			o.idatefromheaderSet = true
+		case "noidatefromheader":
+			o.IDateFromHeader = false
+			o.idatefromheaderSet = true
 
 		case "minsize":
 			v, e := get()
@@ -737,10 +1082,279 @@ func Parse(args []string) (*Options, error) {
 			o.ExitWhenOver = n
 		case "addheader":
 			o.AddHeader = true
+			o.addHeaderSet = true
+		case "noaddheader":
+			o.AddHeader = false
+			o.addHeaderSet = true
 		case "skipemptyfolders":
 			o.SkipEmptyFolders = true
 		case "noskipemptyfolders":
 			o.SkipEmptyFolders = false
+
+		// --- OAuth -------------------------------------------------------
+		case "oauthaccesstoken1":
+			v, e := get()
+			if e != nil {
+				return nil, e
+			}
+			o.OAuthAccessToken1 = v
+			o.Password1 = v
+			o.AuthMech1 = "XOAUTH2"
+			authmech1Set = true
+		case "oauthaccesstoken2":
+			v, e := get()
+			if e != nil {
+				return nil, e
+			}
+			o.OAuthAccessToken2 = v
+			o.Password2 = v
+			o.AuthMech2 = "XOAUTH2"
+			authmech2Set = true
+		case "oauthdirect1", "authdirect1":
+			v, e := get()
+			if e != nil {
+				return nil, e
+			}
+			o.OAuthDirect1 = v
+			o.Password1 = v
+			o.AuthMech1 = "XOAUTH2"
+			authmech1Set = true
+		case "oauthdirect2", "authdirect2":
+			v, e := get()
+			if e != nil {
+				return nil, e
+			}
+			o.OAuthDirect2 = v
+			o.Password2 = v
+			o.AuthMech2 = "XOAUTH2"
+			authmech2Set = true
+
+		// --- Пресеты провайдеров ----------------------------------------
+		case "gmail1":
+			o.Gmail1 = true
+		case "gmail2":
+			o.Gmail2 = true
+		case "office1":
+			o.Office1 = true
+		case "office2":
+			o.Office2 = true
+		case "exchange1":
+			o.Exchange1 = true
+		case "exchange2":
+			o.Exchange2 = true
+		case "domino1":
+			o.Domino1 = true
+		case "domino2":
+			o.Domino2 = true
+		case "disarmreadreceipts":
+			o.DisarmReadReceipts = true
+		case "nodisarmreadreceipts":
+			o.DisarmReadReceipts = false
+		case "regexmess":
+			v, e := get()
+			if e != nil {
+				return nil, e
+			}
+			o.RegexMess = append(o.RegexMess, v)
+		case "noregexmess":
+			o.NoRegexMess = true
+
+		// --- Подписки, ACL, метки ---------------------------------------
+		case "subscribed", "subcribed":
+			o.Subscribed = true
+		case "subscribe":
+			o.Subscribe = true
+		case "nosubscribe":
+			o.Subscribe = false
+		case "subscribeall":
+			o.SubscribeAll = true
+		case "nosyncacls":
+			o.NoSyncAcls = true
+		case "syncacls":
+			o.SyncAcls = true
+		case "synclabels":
+			o.SyncLabels = true
+			o.synclabelsSet = true
+		case "nosynclabels":
+			o.SyncLabels = false
+			o.synclabelsSet = true
+		case "resynclabels":
+			o.ResyncLabels = true
+			o.resynclabelsSet = true
+		case "noresynclabels":
+			o.ResyncLabels = false
+			o.resynclabelsSet = true
+		case "labels1":
+			o.Labels1 = true
+		case "labels2":
+			o.Labels2 = true
+
+		// --- Устойчивость соединения -------------------------------------
+		case "keepalive1":
+			o.Keepalive1 = true
+		case "keepalive2":
+			o.Keepalive2 = true
+		case "nokeepalive1":
+			o.NoKeepalive1 = true
+			o.Keepalive1 = false
+		case "nokeepalive2":
+			o.NoKeepalive2 = true
+			o.Keepalive2 = false
+		case "noabletosearch":
+			o.NoAbilityToSearch = true
+			o.NoAbilityToSearch1 = true
+			o.NoAbilityToSearch2 = true
+		case "noabletosearch1":
+			o.NoAbilityToSearch1 = true
+		case "noabletosearch2":
+			o.NoAbilityToSearch2 = true
+
+		// --- Лимиты буфера/строки ---------------------------------------
+		case "buffersize":
+			v, e := get()
+			if e != nil {
+				return nil, e
+			}
+			n, e2 := strconv.Atoi(v)
+			if e2 != nil {
+				return nil, e2
+			}
+			o.BufferSize = n
+		case "maxlinelength":
+			v, e := get()
+			if e != nil {
+				return nil, e
+			}
+			n, e2 := strconv.Atoi(v)
+			if e2 != nil {
+				return nil, e2
+			}
+			o.MaxLineLength = n
+
+		// --- Дедупликация/качество --------------------------------------
+		case "syncduplicates":
+			o.SyncDuplicates = true
+		case "allowsizemismatch":
+			o.AllowSizeMismatch = true
+		case "skipsize":
+			o.SkipSize = true
+		case "debugcrossduplicates":
+			o.DebugCrossDuplicates = true
+
+		// --- Отладка -----------------------------------------------------
+		case "debugfolders":
+			o.DebugFolders = true
+		case "debugcontent":
+			o.DebugContent = true
+		case "debugflags":
+			o.DebugFlags = true
+		case "debugssl":
+			// imapsync допускает уровень 0..4; проект передаёт int.
+			if p.hasValue() {
+				v, e := get()
+				if e != nil {
+					return nil, e
+				}
+				if n, e2 := strconv.Atoi(v); e2 == nil && n > 0 {
+					o.DebugSSL1 = true
+					o.DebugSSL2 = true
+				}
+			} else {
+				o.DebugSSL1 = true
+				o.DebugSSL2 = true
+			}
+		case "debugssl1":
+			o.DebugSSL1 = true
+		case "debugssl2":
+			o.DebugSSL2 = true
+		case "debugimap1":
+			o.DebugIMAP1 = true
+			o.DebugImap = true
+		case "debugimap2":
+			o.DebugIMAP2 = true
+			o.DebugImap = true
+		case "noerrorsdump":
+			o.NoErrorsDump = true
+		case "nomodulesversion", "no-modulesversion":
+			o.NoModulesVersion = true
+		case "modulesversion":
+			o.ModulesVersion = true
+
+		// --- Прочее, принимаемое для совместимости -----------------------
+		case "passfile1":
+			v, e := get()
+			if e != nil {
+				return nil, e
+			}
+			o.Passfile1 = v
+		case "passfile2":
+			v, e := get()
+			if e != nil {
+				return nil, e
+			}
+			o.Passfile2 = v
+		case "domain1":
+			v, e := get()
+			if e != nil {
+				return nil, e
+			}
+			o.Domain1 = v
+		case "domain2":
+			v, e := get()
+			if e != nil {
+				return nil, e
+			}
+			o.Domain2 = v
+		case "authmd51":
+			o.Authmd51 = true
+		case "authmd52":
+			o.Authmd52 = true
+		case "showpasswords":
+			o.ShowPasswords = true
+		case "nomixfolders":
+			o.NomixFolders = true
+		case "noid":
+			o.Noid = true
+		case "nofoldersizes":
+			o.NoFoldersizes = true
+		case "nofoldersizesatend":
+			o.NoFoldersizesAtEnd = true
+		case "pidfile":
+			v, e := get()
+			if e != nil {
+				return nil, e
+			}
+			o.PidFile = v
+		case "pidfilelocking":
+			o.PidFileLocking = true
+		case "tmpdir":
+			v, e := get()
+			if e != nil {
+				return nil, e
+			}
+			o.TmpDir = v
+		case "abort":
+			o.Abort = true
+		case "emailreport1":
+			o.EmailReport1 = true
+		case "emailreport2":
+			o.EmailReport2 = true
+		case "noemailreport1":
+			o.NoEmailReport1 = true
+		case "noemailreport2":
+			o.NoEmailReport2 = true
+		case "pipemess":
+			v, e := get()
+			if e != nil {
+				return nil, e
+			}
+			o.PipeMess = append(o.PipeMess, v)
+		case "exitstatus0":
+			o.ExitStatus0 = true
+		case "tests":
+			o.Tests = true
+		case "info":
+			o.Info = true
 
 		case "version":
 			o.ShowVersion = true
@@ -776,7 +1390,238 @@ func Parse(args []string) (*Options, error) {
 		o.AuthMech2 = "PLAIN"
 	}
 
+	// Пресеты провайдеров применяются в том же порядке, что и в imapsync:
+	// gmail12 → gmail1 → gmail2 → office1 → office2 → exchange1 → exchange2
+	// → domino1 → domino2.
+	if o.Gmail1 && o.Gmail2 {
+		applyGmail12(o)
+	}
+	if o.Gmail1 {
+		applyGmail1(o)
+	}
+	if o.Gmail2 {
+		applyGmail2(o)
+	}
+	if o.Office1 {
+		applyOffice1(o)
+	}
+	if o.Office2 {
+		applyOffice2(o)
+	}
+	// --exchange1 в imapsync ничего не делает.
+	if o.Exchange2 {
+		applyExchange2(o)
+	}
+	if o.Domino1 {
+		o.Sep1 = `\`
+		o.Prefix1 = ""
+	}
+	if o.Domino2 {
+		o.Sep2 = `\`
+		o.Prefix2 = ""
+		o.RegexTrans2 = append(o.RegexTrans2, `s,^Inbox\\(.*),$1,i`)
+	}
+
+	// Как в Perl imapsync ($SSL1 ||= $PORT1 == 993): порт 993 подразумевает
+	// imap-over-TLS, если ssl/tls не заданы явно (--sslN/--nosslN). Без этого
+	// Go-движок подключается к 993 открытым текстом, и сервер (Yandex, Mail.ru
+	// и т.п.) сбрасывает соединение (EOF) — перенос падает с 0 сообщений.
+	// Явная установка (--sslN/--nosslN, sslNSet) не переопределяется.
+	if o.Port1 == 993 && !o.ssl1Set {
+		o.SSL1 = true
+	}
+	if o.Port2 == 993 && !o.ssl2Set {
+		o.SSL2 = true
+	}
+
 	return o, nil
+}
+
+// gmailFolderLast — папки Gmail, синхронизируемые в последнюю очередь
+// (как в imapsync @folderlast).
+var gmailFolderLast = []string{
+	"[Gmail]/Sent Mail", "[Gmail]/Important", "[Gmail]/Starred",
+	"[Gmail]/Drafts", "[Gmail]/Trash", "[Gmail]/Spam",
+	"[Gmail]/Chats", "[Gmail]/All Mail",
+}
+
+// addExcludeRegexp добавляет регулярное выражение исключения папок
+// (аналог push @exclude в imapsync).
+func addExcludeRegexp(o *Options, pattern string) {
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return
+	}
+	o.Exclude = append(o.Exclude, pattern)
+	o.ExcludeRe = append(o.ExcludeRe, re)
+}
+
+// applyGmail12 — пресет --gmail1 --gmail2 (sub gmail12 в imapsync).
+func applyGmail12(o *Options) {
+	if o.Host1 == "" {
+		o.Host1 = "imap.gmail.com"
+	}
+	if !o.ssl1Set {
+		o.SSL1 = true
+	}
+	if o.Host2 == "" {
+		o.Host2 = "imap.gmail.com"
+	}
+	if !o.ssl2Set {
+		o.SSL2 = true
+	}
+	if o.MaxBytesPerSecond == 0 {
+		o.MaxBytesPerSecond = 300_000
+	}
+	if o.MaxBytesAfter == 0 {
+		o.MaxBytesAfter = 3_000_000_000
+	}
+	if !o.automapSet {
+		o.Automap = true
+	}
+	if !o.maxSleepSet {
+		o.MaxSleep = 100
+	}
+	if !o.skipcrossduplicatesSet {
+		o.SkipCrossDuplicates = false
+	}
+	if !o.synclabelsSet {
+		o.SyncLabels = true
+	}
+	if !o.resynclabelsSet {
+		o.ResyncLabels = true
+	}
+	if !o.idatefromheaderSet {
+		o.IDateFromHeader = true
+	}
+	o.UseHeader = append(o.UseHeader, "X-Gmail-Received", "Message-Id")
+	if !o.NoExcludeOpt {
+		addExcludeRegexp(o, `\[Gmail\]$`)
+	}
+	o.FolderLast = append(o.FolderLast, gmailFolderLast...)
+}
+
+// applyGmail1 — пресет --gmail1 (sub gmail1 в imapsync).
+func applyGmail1(o *Options) {
+	if o.Host1 == "" {
+		o.Host1 = "imap.gmail.com"
+	}
+	if !o.ssl1Set {
+		o.SSL1 = true
+	}
+	if o.MaxBytesPerSecond == 0 {
+		o.MaxBytesPerSecond = 300_000
+	}
+	if o.MaxBytesAfter == 0 {
+		o.MaxBytesAfter = 3_000_000_000
+	}
+	if !o.automapSet {
+		o.Automap = true
+	}
+	if !o.maxSleepSet {
+		o.MaxSleep = 100
+	}
+	if !o.skipcrossduplicatesSet {
+		o.SkipCrossDuplicates = true
+	}
+	o.UseHeader = append(o.UseHeader, "X-Gmail-Received", "Message-Id")
+	o.RegexTrans2 = append(o.RegexTrans2, `s,\[Gmail\].,,`)
+	o.FolderLast = append(o.FolderLast, gmailFolderLast...)
+}
+
+// applyGmail2 — пресет --gmail2 (sub gmail2 в imapsync).
+func applyGmail2(o *Options) {
+	if o.Host2 == "" {
+		o.Host2 = "imap.gmail.com"
+	}
+	if !o.ssl2Set {
+		o.SSL2 = true
+	}
+	if o.MaxBytesPerSecond == 0 {
+		o.MaxBytesPerSecond = 300_000
+	}
+	if o.MaxBytesAfter == 0 {
+		o.MaxBytesAfter = 3_000_000_000
+	}
+	if !o.automapSet {
+		o.Automap = true
+	}
+	if !o.expunge1Set {
+		o.Expunge1 = true
+	}
+	if !o.addHeaderSet {
+		o.AddHeader = true
+	}
+	if !o.maxSleepSet {
+		o.MaxSleep = 100
+	}
+	if !o.idatefromheaderSet {
+		o.IDateFromHeader = true
+	}
+	if !o.NoExcludeOpt {
+		addExcludeRegexp(o, `\[Gmail\]$`)
+	}
+	o.UseHeader = append(o.UseHeader, "Message-Id")
+	o.RegexTrans2 = append(o.RegexTrans2,
+		`s,\[Gmail\].,,`,
+		`s,^ +| +$,,g`,
+		`s,/ +| +/,/,g`,
+		`s/['\^"]/_/g`,
+	)
+	o.FolderLast = append(o.FolderLast, gmailFolderLast...)
+}
+
+// applyOffice1 — пресет --office1 (Office 365 на host1).
+func applyOffice1(o *Options) {
+	if o.Host1 == "" {
+		o.Host1 = "outlook.office365.com"
+	}
+	if !o.ssl1Set {
+		o.SSL1 = true
+	}
+	if !o.NoExcludeOpt {
+		addExcludeRegexp(o, `^Files$`)
+	}
+}
+
+// applyOffice2 — пресет --office2 (Office 365 на host2).
+func applyOffice2(o *Options) {
+	if o.Host2 == "" {
+		o.Host2 = "outlook.office365.com"
+	}
+	if !o.ssl2Set {
+		o.SSL2 = true
+	}
+	if o.MaxSize == 0 {
+		o.MaxSize = 45_000_000
+	}
+	if o.MaxMessagesPerSecond == 0 {
+		o.MaxMessagesPerSecond = 4
+	}
+	o.DisarmReadReceipts = true
+	if !o.NoRegexMess {
+		o.RegexMess = append(o.RegexMess, `s,(.{10239}),$1`+"\r\n"+`,g`)
+	}
+	if !o.NoF1F2 {
+		o.F1F2 = append(o.F1F2, [2]string{"Files", "Files_renamed_by_imapsync"})
+	}
+}
+
+// applyExchange2 — пресет --exchange2 (Exchange на host2).
+func applyExchange2(o *Options) {
+	if o.MaxSize == 0 {
+		o.MaxSize = 10_000_000
+	}
+	if o.MaxMessagesPerSecond == 0 {
+		o.MaxMessagesPerSecond = 4
+	}
+	o.DisarmReadReceipts = true
+	if !o.NoRegexFlag {
+		o.RegexFlag = append(o.RegexFlag, `s/\\Flagged//g`)
+	}
+	if !o.NoRegexMess {
+		o.RegexMess = append(o.RegexMess, `s,(.{10239}),$1`+"\r\n"+`,g`)
+	}
 }
 
 // Validate проверяет обязательные параметры.

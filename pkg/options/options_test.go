@@ -42,6 +42,60 @@ func TestParseEquals(t *testing.T) {
 	}
 }
 
+// Порт 993 подразумевает imap-over-TLS (Perl: $SSL1 ||= $PORT1 == 993).
+func TestPort993ImpliesSSL(t *testing.T) {
+	o, err := Parse([]string{
+		"--host1", "imap.yandex.ru:993", "--user1", "u1",
+		"--host2", "127.0.0.1:45175", "--user2", "u2", "--password2", "p2",
+		"--ssl2", "--sslargs2", "SSL_verify_mode=0",
+	})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if !o.SSL1 {
+		t.Fatalf("host1 на 993 без --ssl1: ожидаем SSL1=true, got %+v", o)
+	}
+	if o.Port2 != 45175 || !o.SSL2 {
+		t.Fatalf("host2: port=%d ssl=%v", o.Port2, o.SSL2)
+	}
+}
+
+// Явные --nosslN/--sslN имеют приоритет над автоопределением по порту 993.
+func TestPort993ExplicitSSLWins(t *testing.T) {
+	o, err := Parse([]string{
+		"--host1", "h1:993", "--user1", "u1",
+		"--host2", "h2:993", "--user2", "u2",
+		"--nossl1", "--ssl2",
+	})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if o.SSL1 {
+		t.Fatalf("--nossl1 на 993: ожидаем SSL1=false, got %+v", o)
+	}
+	if !o.SSL2 {
+		t.Fatalf("--ssl2 на 993: ожидаем SSL2=true, got %+v", o)
+	}
+}
+
+// Порт, заданный отдельным --portN, тоже включает TLS по умолчанию.
+func TestPortFlag993ImpliesSSL(t *testing.T) {
+	o, err := Parse([]string{
+		"--host1", "h1", "--user1", "u1",
+		"--host2", "h2", "--user2", "u2",
+		"--port1", "993",
+	})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if !o.SSL1 {
+		t.Fatalf("--port1 993: ожидаем SSL1=true, got %+v", o)
+	}
+	if o.SSL2 {
+		t.Fatalf("host2 без порта 993: ожидаем SSL2=false, got %+v", o)
+	}
+}
+
 func TestDelete1ImpliesExpunge1(t *testing.T) {
 	o, err := Parse([]string{
 		"--host1", "h1", "--user1", "u1", "--host2", "h2", "--user2", "u2",
