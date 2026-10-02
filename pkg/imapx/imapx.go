@@ -551,11 +551,11 @@ func (c *Conn) FetchRfc822(uid uint32) ([]byte, *imap.Message, error) {
 // AppendMessage добавляет сообщение в папку с флагами и датой.
 //
 // Литералы длиннее asyncLiteralLimit go-imap отправляет синхронно —
-// с ожиданием continuation-запроса «+». Ряд серверов (example.com)
-// continuation не присылает, и запись прерывается ошибкой
-// «cannot send literal: no continuation request received». Поэтому
-// для больших писем используется APPEND с несинхронным литералом
-// ({N+}, RFC 3501 §2.5.10), если сервер объявил LITERAL+.
+// с ожиданием continuation-запроса «+». Ряд серверов continuation не
+// присылает, и запись прерывается ошибкой «cannot send literal: no
+// continuation request received». Поэтому для больших писем
+// используется APPEND с несинхронным литералом ({N+}, RFC 3501
+// §2.5.10), если сервер объявил LITERAL+.
 func (c *Conn) AppendMessage(folder string, flags []string, date time.Time, data []byte) error {
 	lit := bytesLiteral{Reader: bytes.NewReader(data)}
 	if len(data) > asyncLiteralLimit {
@@ -573,7 +573,7 @@ func (c *Conn) AppendMessage(folder string, flags []string, date time.Time, data
 // appendAsyncLiteral выполняет APPEND с несинхронным литералом ({N+},
 // RFC 3501 §2.5.10). Тело письма передаётся как RawString — go-imap
 // пишет его в поток как есть, без ожидания continuation-запроса «+»,
-// который серверы вроде example.com не присылают.
+// который часть серверов не присылает.
 func (c *Conn) appendAsyncLiteral(folder string, flags []string, date time.Time, data []byte) error {
 	name, err := utf7.Encoding.NewEncoder().String(folder)
 	if err != nil {
