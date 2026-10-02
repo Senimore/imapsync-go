@@ -1437,6 +1437,14 @@ func Parse(args []string) (*Options, error) {
 	return o, nil
 }
 
+// CacheNamespace — идентификатор пары аккаунтов для имени файла кэша:
+// кэшированные сопоставления UID имеют смысл только для конкретной пары
+// (host1/user1 -> host2/user2). Разные пары в одном каталоге получают
+// разные файлы и не конкурируют за запись при параллельных запусках.
+func (o *Options) CacheNamespace() string {
+	return fmt.Sprintf("%s@%s__%s@%s", o.User1, o.Host1, o.User2, o.Host2)
+}
+
 // gmailFolderLast — папки Gmail, синхронизируемые в последнюю очередь
 // (как в imapsync @folderlast).
 var gmailFolderLast = []string{

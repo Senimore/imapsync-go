@@ -1,5 +1,10 @@
 // Package cache реализует персистентный локальный кэш синхронизации на SQLite
 // для опций --usecache и --useuid (аналог кэша imapsync).
+//
+// Кэш рассчитан на параллельные сессии: база открывается в режиме WAL
+// (читатели не блокируют писателя) с busy_timeout (писатели ждут блокировку,
+// а не падают с SQLITE_BUSY), а каждая пара аккаунтов получает отдельный
+// файл по namespace — см. Open.
 package cache
 
 import (
@@ -7,10 +12,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	_ "modernc.org/sqlite"
 )
+
+// busyTimeoutMS — время ожидания блокировки записи (SQLite busy_timeout).
+const busyTimeoutMS = 5000
 
 // Cache хранит соответствие между сообщениями host1 и host2.
 type Cache struct {
@@ -18,21 +27,34 @@ type Cache struct {
 	db *sql.DB
 }
 
-// Open открывает или создаёт базу SQLite в указанном каталоге.
-func Open(dir string) (*Cache, error) {
+// Open открывает или создаёт базу SQLite в каталоге dir для namespace.
+//
+// namespace задаёт имя файла (cache-<namespace>.db): разные пары аккаунтов
+// работают в разных файлах и не конкурируют за запись. Пустой namespace
+// даёт общий файл cache.db (совместимость со старыми кэшами).
+//
+// Файл открывается в WAL + busy_timeout: несколько процессов (параллельные
+// запуски) могут писать в одну базу, блокировки разрешаются ожиданием.
+func Open(dir, namespace string) (*Cache, error) {
 	if dir == "" {
 		dir = ".imapsync_cache"
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("создание каталога кэша %q: %w", dir, err)
 	}
-	dbPath := filepath.Join(dir, "cache.db")
-	db, err := sql.Open("sqlite", dbPath)
+	dbPath := filepath.Join(dir, DBName(namespace))
+
+	// WAL: читатели не мешают писателю; busy_timeout: писатели дожидаются
+	// блокировки вместо SQLITE_BUSY; synchronous=NORMAL — быстрый WAL-журнал.
+	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(%d)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)",
+		dbPath, busyTimeoutMS)
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("открытие кэша %q: %w", dbPath, err)
 	}
 
-	// Ограничиваем конкурентный доступ внутри SQLite
+	// В одном процессе запись идёт по одному соединению (WAL допускает
+	// одного писателя за раз); межпроцессная конкурентность — за WAL.
 	db.SetMaxOpenConns(1)
 
 	schema := `
@@ -52,6 +74,28 @@ func Open(dir string) (*Cache, error) {
 	}
 
 	return &Cache{db: db}, nil
+}
+
+// DBName возвращает имя файла кэша для namespace (без каталога).
+// Пустой namespace — общий файл cache.db.
+func DBName(namespace string) string {
+	if namespace == "" {
+		return "cache.db"
+	}
+	var b strings.Builder
+	for _, r := range namespace {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	name := strings.Trim(b.String(), "_")
+	if name == "" {
+		return "cache.db"
+	}
+	return "cache-" + name + ".db"
 }
 
 // Close закрывает базу данных кэша.
@@ -95,6 +139,21 @@ func (c *Cache) PutMapping(folder string, uid1, uid2 uint32, key string) error {
 		ON CONFLICT(folder, uid1) DO UPDATE SET uid2 = excluded.uid2, msg_key = excluded.msg_key
 	`, folder, uid1, uid2, key)
 	return err
+}
+
+// JournalMode возвращает текущий режим журнала базы (wal/delete и т.п.) —
+// для проверки того, что база открыта в WAL.
+func (c *Cache) JournalMode() (string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.db == nil {
+		return "", fmt.Errorf("кэш закрыт")
+	}
+	var mode string
+	if err := c.db.QueryRow("PRAGMA journal_mode").Scan(&mode); err != nil {
+		return "", err
+	}
+	return mode, nil
 }
 
 // DeleteFolder очищает кэш для указанной папки.

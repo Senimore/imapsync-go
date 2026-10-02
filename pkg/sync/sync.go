@@ -90,7 +90,9 @@ func New(src, dst *imapx.Conn, opts *options.Options, log *logging.Logger, stats
 	s.regextrans2Rules = parseRegexSubs(opts.RegexTrans2)
 	s.regexflagRules = parseRegexSubs(opts.RegexFlag)
 	if opts.UseCache {
-		c, err := cache.Open(opts.CacheDir)
+		// Кэш — по паре аккаунтов: параллельные миграции разных аккаунтов
+		// работают в отдельных файлах и не конкурируют за запись.
+		c, err := cache.Open(opts.CacheDir, opts.CacheNamespace())
 		if err != nil {
 			log.Printf("Предупреждение: не удалось инициализировать кэш: %v\n", err)
 		} else {
