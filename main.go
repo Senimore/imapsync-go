@@ -10,7 +10,7 @@
 // было использовать из сторонних проектов:
 //
 //	import "github.com/Senimore/imapsync-go/pkg/imapsync"
-//	code := imapsync.Run(os.Args[1:], os.Stdout)
+//	code := imapsync.Run(os.Args[1:], os.Stdout, os.Stderr)
 package main
 
 import (
@@ -20,5 +20,5 @@ import (
 )
 
 func main() {
-	os.Exit(imapsync.Run(os.Args[1:], os.Stdout))
+	os.Exit(imapsync.Run(os.Args[1:], os.Stdout, os.Stderr))
 }

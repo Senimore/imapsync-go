@@ -15,7 +15,7 @@
 - **Ограничения**: `--maxmessagespersecond`, `--maxbytespersecond` (+ `--maxbytesafter`), `--errorsmax`, `--exitwhenover`.
 - **Удаления**: `--delete1`, `--delete2`, `--delete2folders`, `--delete1emptyfolders`, `--expunge1`, `--expunge2`.
 - **Пустые папки**: `--skipemptyfolders` (по умолчанию) / `--noskipemptyfolders`.
-- **Параллелизм**: `--threads N` (каждая горутина получает свою пару соединений).
+- **Параллелизм**: `--threads N` (каждая горутина получает свою пару соединений); параллельные вызовы движка из нескольких горутин (распараллеливание по аккаунтам).
 - **Режимы**: `--dry`, `--justconnect`, `--justlogin`, `--justfolders`, `--justfoldersizes`, `--justbanner`.
 - **Логирование**: двойной вывод (stdout + файл), `--logfile`, `--nolog`, `--debug`, `--debugimap`.
 - **Отчёт**: imapsync-совместимый итоговый отчёт и коды выхода.
@@ -372,7 +372,7 @@ import (
 
 func main() {
 	// Разбор аргументов, валидация, соединения, синхронизация, отчёт.
-	os.Exit(imapsync.Run(os.Args[1:], os.Stdout))
+	os.Exit(imapsync.Run(os.Args[1:], os.Stdout, os.Stderr))
 }
 ```
 
@@ -397,7 +397,7 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	code := imapsync.RunSync(opts, os.Stdout)
+	code := imapsync.RunSync(opts, os.Stdout, os.Stderr)
 	// Статистику можно получить через report.Snapshot (см. pkg/report).
 	os.Exit(code)
 }
@@ -431,3 +431,11 @@ go test -race -count=1 ./...
 - В режиме `--dry` отсутствие папки назначения не является ошибкой (она будет создана при реальном запуске).
 - `--threads N` открывает по одному IMAP-соединению на горутину (у одного соединения активна одна папка).
 - Синтаксис опций: `--key value` и `--key=value` (как в imapsync).
+- Вызовы `Run`/`RunSync`/`RunSyncInProcess` параллельно безопасны: всё
+  состояние (опции, журнал, статистика, соединения, кэш) создаётся на
+  каждый запуск, обработчик SIGINT/SIGTERM регистрируется на вызов и
+  снимается перед возвратом. Несколько горутин могут выполнять
+  синхронизацию одновременно — распараллеливание миграции по аккаунтам.
+- `--usecache`/`--useuid` с общим `--cachedir` на несколько параллельных
+  запусков даёт конкурентные записи в один SQLite-файл (`SQLITE_BUSY`):
+  для кэшированных переносов используйте свой `--cachedir` на запуск.

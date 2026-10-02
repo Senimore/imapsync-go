@@ -20,7 +20,6 @@ import (
 	"os"
 	"os/signal"
 	"sort"
-	gosync "sync"
 	"syscall"
 	"time"
 
@@ -42,16 +41,20 @@ const (
 
 // Run выполняет полный цикл синхронизации по аргументам командной строки
 // (разбор, валидация, соединения, синхронизация, отчёт). Возвращает код
-// выхода процесса. stdout — куда писать прогресс (обычно os.Stdout).
+// выхода процесса. stdout — куда писать прогресс (обычно os.Stdout),
+// stderr — куда писать сообщения об ошибках (обычно os.Stderr); stderr ==
+// nil трактуется как os.Stderr.
 //
-// Функция перехватывает SIGINT/SIGTERM для корректного прерывания
-// синхронизации; при программном использовании это безопасно, т.к.
-// обработчик снимается через signal.Reset перед возвратом.
-func Run(args []string, stdout io.Writer) int {
+// Вызовы параллельно безопасны: всё состояние (опции, журнал, статистика,
+// соединения, кэш) создаётся на каждый вызов, обработчик SIGINT/SIGTERM
+// регистрируется на вызов и снимается через signal.Stop перед возвратом,
+// поэтому несколько горутин могут выполнять синхронизацию одновременно.
+func Run(args []string, stdout, stderr io.Writer) int {
+	stderr = writerOrStderr(stderr)
 	opts, err := options.Parse(args)
 	if err != nil {
-		fmt.Fprintln(stderrOf(stdout), "Ошибка разбора опций:", err)
-		fmt.Fprintln(stderrOf(stdout), options.Usage())
+		fmt.Fprintln(stderr, "Ошибка разбора опций:", err)
+		fmt.Fprintln(stderr, options.Usage())
 		return ExUsage
 	}
 
@@ -68,18 +71,20 @@ func Run(args []string, stdout io.Writer) int {
 		return ExOK
 	}
 
-	code := RunSync(opts, stdout)
+	code := RunSync(opts, stdout, stderr)
 	if code == ExUsage {
-		fmt.Fprintln(stderrOf(stdout), options.Usage())
+		fmt.Fprintln(stderr, options.Usage())
 	}
 	return code
 }
 
 // RunSync выполняет полный цикл синхронизации с готовыми опциями
 // (программный вызов без разбора аргументов). Возвращает код выхода.
-func RunSync(opts *options.Options, stdout io.Writer) int {
+// stderr == nil трактуется как os.Stderr.
+func RunSync(opts *options.Options, stdout, stderr io.Writer) int {
+	stderr = writerOrStderr(stderr)
 	if err := opts.Validate(); err != nil {
-		fmt.Fprintln(stderrOf(stdout), "Ошибка:", err)
+		fmt.Fprintln(stderr, "Ошибка:", err)
 		return ExUsage
 	}
 
@@ -103,7 +108,7 @@ func RunSync(opts *options.Options, stdout io.Writer) int {
 	defLog := logging.DefaultLogPath(opts.User1, opts.User2, opts.Logdir)
 	log, err := logging.New(stdout, opts.Logfile, opts.NoLog, opts.Debug, defLog)
 	if err != nil {
-		fmt.Fprintln(stderrOf(stdout), "Ошибка журнала:", err)
+		fmt.Fprintln(stderr, "Ошибка журнала:", err)
 		return ExCantCreat
 	}
 	defer log.Close()
@@ -332,29 +337,28 @@ func ExitCode(errors int64, errorsMax int) int {
 	return ExOK
 }
 
-// guardMu сериализует вызовы RunSyncInProcess (подмена stderrOf +
-// перехват сигналов должны быть атомарными).
-var guardMu gosync.Mutex
-
-// stderrOf возвращает поток ошибок. По умолчанию это os.Stderr; в
-// встроенном режиме (RunSyncInProcess) — поток, переданный вызывающим
-// кодом, чтобы весь вывод (прогресс + ошибки) собирался в один буфер.
-var stderrOf func(io.Writer) io.Writer = func(io.Writer) io.Writer { return os.Stderr }
+// writerOrStderr — поток ошибок по умолчанию (os.Stderr) для nil.
+func writerOrStderr(w io.Writer) io.Writer {
+	if w == nil {
+		return os.Stderr
+	}
+	return w
+}
 
 // RunSyncInProcess выполняет синхронизацию «в процессе» (без запуска
 // внешнего бинарника): весь вывод — прогресс и сообщения об ошибках —
 // пишется в stdout, ошибки — в stderr. Возвращает код выхода в стиле
 // imapsync.
 //
-// Вызовы сериализуются: реализация перехватывает SIGINT/SIGTERM и
-// подменяет поток ошибок на время работы, поэтому параллельные вызовы
-// из нескольких горутин не поддерживаются (агент и так ограничивает
-// параллелизм одного движка).
+// Вызовы параллельно безопасны и могут выполняться из нескольких горутин
+// одновременно (распараллеливание миграции по аккаунтам): вывод каждого
+// запуска идёт в его собственные потоки, обработчик сигналов регистрируется
+// на вызов и снимается перед возвратом.
+//
+// Единственное исключение — --usecache/--useuid: несколько запусков с одним
+// --cachedir делят один файл SQLite. Кэш настраивается на каждый запуск
+// (свой --cachedir на аккаунт), иначе конкурентные записи в одну базу
+// дают SQLITE_BUSY.
 func RunSyncInProcess(args []string, stdout, stderr io.Writer) int {
-	guardMu.Lock()
-	defer guardMu.Unlock()
-	prev := stderrOf
-	stderrOf = func(io.Writer) io.Writer { return stderr }
-	defer func() { stderrOf = prev }()
-	return Run(args, stdout)
+	return Run(args, stdout, stderr)
 }
